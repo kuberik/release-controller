@@ -32,14 +32,14 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/Masterminds/semver"
-	"github.com/docker/cli/cli/config"
-	"github.com/docker/cli/cli/config/configfile"
 	"github.com/go-logr/logr"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/crane"
-	"github.com/google/go-containerregistry/pkg/name"
 	rolloutv1alpha1 "github.com/kuberik/rollout-controller/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	"github.com/docker/cli/cli/config"
+	"github.com/docker/cli/cli/config/configfile"
+	"github.com/google/go-containerregistry/pkg/name"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sptr "k8s.io/utils/ptr"
 )
@@ -52,7 +52,9 @@ type RealClock struct{}
 
 func (RealClock) Now() time.Time { return time.Now() }
 
-// RolloutReconciler reconciles a Rollout object
+// RolloutReconciler reconciles a Rollout object. It monitors a releases repository for new versions,
+// evaluates gates and health checks, and updates the Rollout status to reflect the desired version.
+// It does not directly deploy images but signals the desired version for other components (e.g., Flux CD) to act upon.
 type RolloutReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -64,15 +66,12 @@ type RolloutReconciler struct {
 // +kubebuilder:rbac:groups=kuberik.com,resources=rollouts/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the Rollout object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.20.4/pkg/reconcile
+// Reconcile is part of the main Kubernetes reconciliation loop. It aims to move the current
+// state of the cluster closer to the desired state defined by Rollout resources.
+// The Reconcile function fetches available versions from the `ReleasesRepository`,
+// determines the desired version based on gates, health checks, and `WantedVersion` override,
+// and then updates the `Rollout.Status` to reflect this desired version and its history.
+// It does not directly deploy images to a target.
 func (r *RolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -84,9 +83,9 @@ func (r *RolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	releasesAuthOpts, targetAuthOpts, err := r.fetchAuthOptions(ctx, req.Namespace, &rollout)
+	releasesAuthOpts, err := r.fetchAuthOptions(ctx, req.Namespace, &rollout)
 	if err != nil {
-		log.Error(err, "Failed to get authentication options")
+		log.Error(err, "Failed to get authentication options for releases repository")
 		return ctrl.Result{}, r.updateRolloutStatusOnError(ctx, &rollout, "RolloutFailed", err.Error())
 	}
 
@@ -157,8 +156,10 @@ func (r *RolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	if err := r.deployRelease(ctx, &rollout, *wantedRelease, releasesAuthOpts, targetAuthOpts); err != nil {
-		log.Error(err, "Failed to deploy release")
+	// The deployRelease function now only updates status and history.
+	// The actual image update is handled by other components (e.g. FluxOCIRepositoryReconciler)
+	if err := r.deployRelease(ctx, &rollout, *wantedRelease); err != nil {
+		log.Error(err, "Failed to record deployment of release")
 		return ctrl.Result{}, errors.Join(err, r.updateRolloutStatusOnError(ctx, &rollout, "RolloutFailed", err.Error()))
 	}
 
@@ -268,17 +269,13 @@ func (r *RolloutReconciler) getAuthOptions(ctx context.Context, namespace string
 	return []crane.Option{crane.WithAuthFromKeychain(&dockerConfigKeychain{config: config})}, nil
 }
 
-// fetchAuthOptions fetches authentication options for both releases and target repositories.
-func (r *RolloutReconciler) fetchAuthOptions(ctx context.Context, namespace string, rollout *rolloutv1alpha1.Rollout) ([]crane.Option, []crane.Option, error) {
+// fetchAuthOptions fetches authentication options for the releases repository.
+func (r *RolloutReconciler) fetchAuthOptions(ctx context.Context, namespace string, rollout *rolloutv1alpha1.Rollout) ([]crane.Option, error) {
 	releasesAuthOpts, err := r.getAuthOptions(ctx, namespace, rollout.Spec.ReleasesRepository.Auth)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get authentication options for releases repository: %w", err)
+		return nil, fmt.Errorf("failed to get authentication options for releases repository: %w", err)
 	}
-	targetAuthOpts, err := r.getAuthOptions(ctx, namespace, rollout.Spec.TargetRepository.Auth)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get authentication options for target repository: %w", err)
-	}
-	return releasesAuthOpts, targetAuthOpts, nil
+	return releasesAuthOpts, nil
 }
 
 // updateAvailableReleases checks if releases should be updated, fetches them if needed, and updates status.
@@ -422,16 +419,12 @@ func (r *RolloutReconciler) selectWantedRelease(rollout *rolloutv1alpha1.Rollout
 	return nil, nil
 }
 
-// deployRelease copies the release and updates the rollout history and status.
-func (r *RolloutReconciler) deployRelease(ctx context.Context, rollout *rolloutv1alpha1.Rollout, wantedRelease string, releasesAuthOpts, targetAuthOpts []crane.Option) error {
-	err := crane.Copy(
-		fmt.Sprintf("%s:%s", rollout.Spec.ReleasesRepository.URL, wantedRelease),
-		fmt.Sprintf("%s:latest", rollout.Spec.TargetRepository.URL),
-		append(releasesAuthOpts, targetAuthOpts...)...,
-	)
-	if err != nil {
-		return err
-	}
+// deployRelease updates the rollout history and status to reflect the selection of the wanted release.
+// This function signifies that a version has been chosen for deployment; actual deployment
+// is handled by external components based on the updated Rollout status or linked resources
+// like a Flux OCIRepository (updated by FluxOCIRepositoryReconciler).
+func (r *RolloutReconciler) deployRelease(ctx context.Context, rollout *rolloutv1alpha1.Rollout, wantedRelease string) error {
+	logf.FromContext(ctx).Info("Recording selection of release for deployment", "version", wantedRelease)
 	// Add new entry to history with BakeStatus only if baking is enabled
 	var bakeStatus, bakeStatusMsg *string
 	if rollout.Spec.BakeTime != nil && rollout.Spec.HealthCheckSelector != nil {
@@ -462,7 +455,7 @@ func (r *RolloutReconciler) deployRelease(ctx context.Context, rollout *rolloutv
 		Status:             metav1.ConditionTrue,
 		LastTransitionTime: metav1.Now(),
 		Reason:             "RolloutSucceeded",
-		Message:            "Release deployed successfully",
+		Message:            "Release version selected and recorded successfully in status",
 	})
 	return r.Status().Update(ctx, rollout)
 }

@@ -1,8 +1,19 @@
 # rollout-controller
-// TODO(user): Add simple overview of use/purpose
+
+The `rollout-controller` is a Kubernetes controller that manages the rollout of new application versions. It monitors a specified OCI registry for new image tags (versions) and updates the status of a `Rollout` custom resource to reflect the desired version based on gate checks and health checks. It does not directly deploy images but rather signals the desired version, which can then be acted upon by other components in a GitOps workflow (e.g., Flux CD).
 
 ## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+
+This controller implements a progressive delivery strategy. Key functionalities include:
+
+- **Version Discovery**: Periodically polls an OCI image registry (specified in `spec.releasesRepository`) to discover available application versions (tags).
+- **Version Selection**: Selects the latest suitable version based on semantic versioning. It can also be overridden by `spec.wantedVersion`.
+- **Gate Evaluation**: Integrates with `RolloutGate` custom resources. A rollout proceeds only if all relevant gates are passing or allow the selected version.
+- **Health Checks & Bake Time**: After a version is notionally "deployed" (i.e., its selection is recorded in status), it can monitor `HealthCheck` resources for a specified `bakeTime` before considering the version stable.
+- **Status Update**: Updates the `Rollout` custom resource's status with the history of deployed versions, available releases, and the status of gates and health checks.
+- **Integration with Flux (via `FluxOCIRepositoryReconciler`)**: While the `Rollout` controller itself doesn't deploy images, it's designed to work in tandem with the `FluxOCIRepositoryReconciler`. The `Rollout` controller updates the `Rollout` status, and the `FluxOCIRepositoryReconciler` watches `Rollout` resources. When a `Rollout` indicates a new version, the `FluxOCIRepositoryReconciler` updates the tag of a linked Flux `OCIRepository` custom resource. This change is then picked up by Flux's source-controller to pull the new image manifest, and subsequently by kustomize-controller/helm-controller to deploy it.
+
+The `Rollout` controller itself does not directly interact with deployment workloads (like Kubernetes Deployments or Argo Rollouts). It focuses on the pre-deployment phase of selecting and validating a version, relying on other controllers (typically GitOps tools like Flux) to enact the deployment based on the updated `OCIRepository`.
 
 ## Getting Started
 
@@ -92,6 +103,34 @@ the project, i.e.:
 kubectl apply -f https://raw.githubusercontent.com/<org>/rollout-controller/<tag or branch>/dist/install.yaml
 ```
 
+## Linking OCIRepositories to Rollouts
+
+For a `Rollout` custom resource to trigger an update in a Flux `OCIRepository` (via the `FluxOCIRepositoryReconciler`), the `OCIRepository` resource must be annotated. This annotation allows the `FluxOCIRepositoryReconciler` component of the `rollout-controller` project to identify which `OCIRepository` it should update when its associated `Rollout` resource's deployment history changes.
+
+The required annotation is:
+- Key: `kuberik.com/rollout-name`
+- Value: The name of the `Rollout` resource that should manage this `OCIRepository`.
+
+When a `Rollout` (e.g., `my-app-rollout`) is reconciled by the main `Rollout` controller, its status is updated to reflect the latest chosen version. The `FluxOCIRepositoryReconciler` (a separate controller part of this project) observes these `Rollout` resources. If an `OCIRepository` in the same namespace has the annotation `kuberik.com/rollout-name: "my-app-rollout"`, the `FluxOCIRepositoryReconciler` will update that `OCIRepository`'s `spec.ref.tag` to the latest version from the `Rollout`'s status history. Any existing `digest` or `semver` in `spec.ref` will be cleared to ensure the `tag` takes precedence. This change to the `OCIRepository` is then processed by Flux CD to deploy the new version.
+
+Here is an example snippet of an `OCIRepository` manifest:
+
+```yaml
+apiVersion: source.toolkit.fluxcd.io/v1beta2
+kind: OCIRepository
+metadata:
+  name: my-app-image-repo
+  namespace: default
+  annotations:
+    kuberik.com/rollout-name: "my-app-rollout" # Links this OCIRepository to the 'my-app-rollout' Rollout
+spec:
+  interval: 1m
+  url: oci://ghcr.io/my-org/my-app
+  # The tag will be updated by the Rollout controller
+  # ref:
+  #   tag: "initial-tag" # This will be overwritten
+```
+
 ### By providing a Helm Chart
 
 1. Build the chart using the optional helm plugin
@@ -112,6 +151,8 @@ is manually re-applied afterwards.
 
 ## Contributing
 // TODO(user): Add detailed information on how you would like others to contribute to this project
+
+This project also includes a controller that interacts with Flux CD's `OCIRepository` resources. See the "Linking OCIRepositories to Rollouts" section for more details on its configuration.
 
 **NOTE:** Run `make help` for more information on all potential `make` targets
 

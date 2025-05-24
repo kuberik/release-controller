@@ -22,29 +22,31 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	fluxmeta "github.com/fluxcd/pkg/apis/meta"
 	sourcev1beta2 "github.com/fluxcd/source-controller/api/v1beta2"
 	rolloutv1alpha1 "github.com/kuberik/rollout-controller/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 var _ = Describe("Flux OCIRepository Controller", func() {
-	Context("When reconciling a resource", func() {
-		const resourceName = "test-resource"
+	Context("When reconciling a Rollout", func() {
+		const rolloutName = "test-rollout"
+		const ociRepoName = "test-oci-repo"
+		const newVersion = "1.0.1"
 
 		ctx := context.Background()
-		var namespace string
-		var typeNamespacedName types.NamespacedName
-		var rollout *rolloutv1alpha1.Rollout
-		var ociRepo *sourcev1beta2.OCIRepository
+		var namespace *corev1.Namespace
+		var rolloutNamespacedName types.NamespacedName
+		var ociRepoNamespacedName types.NamespacedName
+		var testRollout *rolloutv1alpha1.Rollout
+		var testOCIRepo *sourcev1beta2.OCIRepository
 
-		JustBeforeEach(func() {
+		var controllerReconciler *FluxOCIRepositoryReconciler
+
+		BeforeEach(func() {
 			By("creating a unique namespace for the test")
 			ns := &corev1.Namespace{
 				ObjectMeta: metav1.ObjectMeta{
@@ -52,238 +54,176 @@ var _ = Describe("Flux OCIRepository Controller", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, ns)).To(Succeed())
-			namespace = ns.Name
+			namespace = ns
 
-			typeNamespacedName = types.NamespacedName{
-				Name:      resourceName,
-				Namespace: namespace,
+			rolloutNamespacedName = types.NamespacedName{
+				Name:      rolloutName,
+				Namespace: namespace.Name,
+			}
+			ociRepoNamespacedName = types.NamespacedName{
+				Name:      ociRepoName,
+				Namespace: namespace.Name,
 			}
 
-			By("creating the Rollout")
-			rollout = &rolloutv1alpha1.Rollout{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      resourceName,
-					Namespace: namespace,
-				},
-				Spec: rolloutv1alpha1.RolloutSpec{
-					ReleasesRepository: rolloutv1alpha1.Repository{
-						URL: "ghcr.io/test/releases",
-					},
-					TargetRepository: rolloutv1alpha1.Repository{
-						URL: "ghcr.io/test/target:latest",
-					},
-				},
+			controllerReconciler = &FluxOCIRepositoryReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
 			}
-			Expect(k8sClient.Create(ctx, rollout)).To(Succeed())
-
-			By("creating a matching OCIRepository")
-			ociRepo = &sourcev1beta2.OCIRepository{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-oci-repo",
-					Namespace: namespace,
-				},
-				Spec: sourcev1beta2.OCIRepositorySpec{
-					URL: "oci://ghcr.io/test/target",
-					Reference: &sourcev1beta2.OCIRepositoryRef{
-						Tag: "latest",
-					},
-					Interval: metav1.Duration{Duration: time.Minute},
-				},
-			}
-			Expect(k8sClient.Create(ctx, ociRepo)).To(Succeed())
 		})
 
 		AfterEach(func() {
-			By("Cleaning up the test namespace")
-			ns := &corev1.Namespace{
+			By("Deleting the test namespace")
+			Expect(k8sClient.Delete(ctx, namespace)).To(Succeed())
+		})
+
+		createRollout := func(withHistory bool) *rolloutv1alpha1.Rollout {
+			r := &rolloutv1alpha1.Rollout{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: namespace,
+					Name:      rolloutName,
+					Namespace: namespace.Name,
+				},
+				Spec: rolloutv1alpha1.RolloutSpec{
+					ReleasesRepository: rolloutv1alpha1.Repository{ // This field is part of the spec but not used by this controller
+						URL: "ghcr.io/test/releases",
+					},
 				},
 			}
-			Expect(k8sClient.Delete(ctx, ns)).To(Succeed())
-		})
-
-		It("should update OCIRepository when Rollout has new deployment", func() {
-			By("Adding deployment history to Rollout")
-			rollout.Status.History = []rolloutv1alpha1.DeploymentHistoryEntry{
-				{
-					Version:   "1.0.0",
-					Timestamp: metav1.Now(),
-				},
+			Expect(k8sClient.Create(ctx, r)).To(Succeed())
+			if withHistory {
+				r.Status.History = []rolloutv1alpha1.DeploymentHistoryEntry{
+					{Version: newVersion, Timestamp: metav1.Now()},
+					{Version: "1.0.0", Timestamp: metav1.Time{Time: time.Now().Add(-time.Hour)}},
+				}
+				Expect(k8sClient.Status().Update(ctx, r)).To(Succeed())
 			}
-			Expect(k8sClient.Status().Update(ctx, rollout)).To(Succeed())
+			return r
+		}
 
-			By("Reconciling the resources")
-			controllerReconciler := &FluxOCIRepositoryReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
-			}
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(err).NotTo(HaveOccurred())
-
-			By("Verifying that the OCIRepository was updated")
-			updatedOCIRepo := &sourcev1beta2.OCIRepository{}
-			err = k8sClient.Get(ctx, types.NamespacedName{
-				Name:      ociRepo.Name,
-				Namespace: namespace,
-			}, updatedOCIRepo)
-			Expect(err).NotTo(HaveOccurred())
-
-			Expect(updatedOCIRepo.Annotations).NotTo(BeNil())
-			Expect(updatedOCIRepo.Annotations["reconcile.fluxcd.io/requestedAt"]).NotTo(BeEmpty())
-		})
-
-		It("should not update OCIRepository when it's already up to date", func() {
-			By("Adding deployment history to Rollout")
-			rollout.Status.History = []rolloutv1alpha1.DeploymentHistoryEntry{
-				{
-					Version:   "1.0.0",
-					Timestamp: metav1.Time{Time: time.Now().Add(-time.Hour)}, // 1 hour ago
-				},
-			}
-			Expect(k8sClient.Status().Update(ctx, rollout)).To(Succeed())
-
-			By("Setting OCIRepository's last update time to be newer")
-			meta.SetStatusCondition(&ociRepo.Status.Conditions, metav1.Condition{
-				Type:               fluxmeta.ReadyCondition,
-				Status:             metav1.ConditionTrue,
-				LastTransitionTime: metav1.Now(),
-				Reason:             "Succeeded",
-				Message:            "Reconciliation succeeded",
-			})
-			Expect(k8sClient.Status().Update(ctx, ociRepo)).To(Succeed())
-
-			By("Reconciling the resources")
-			controllerReconciler := &FluxOCIRepositoryReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
-			}
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(err).NotTo(HaveOccurred())
-
-			By("Verifying that the OCIRepository was not updated")
-			updatedOCIRepo := &sourcev1beta2.OCIRepository{}
-			err = k8sClient.Get(ctx, types.NamespacedName{
-				Name:      ociRepo.Name,
-				Namespace: namespace,
-			}, updatedOCIRepo)
-			Expect(err).NotTo(HaveOccurred())
-
-			Expect(updatedOCIRepo.Annotations).To(BeNil())
-		})
-
-		It("should not update OCIRepository with different URL", func() {
-			By("Creating an OCIRepository with different URL")
-			differentOCIRepo := &sourcev1beta2.OCIRepository{
+		createOCIRepository := func(annotations map[string]string, initialRef *sourcev1beta2.OCIRepositoryRef) *sourcev1beta2.OCIRepository {
+			oci := &sourcev1beta2.OCIRepository{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "different-oci-repo",
-					Namespace: namespace,
+					Name:        ociRepoName,
+					Namespace:   namespace.Name,
+					Annotations: annotations,
 				},
 				Spec: sourcev1beta2.OCIRepositorySpec{
-					URL: "oci://ghcr.io/test/different",
-					Reference: &sourcev1beta2.OCIRepositoryRef{
-						Tag: "latest",
-					},
-					Interval: metav1.Duration{Duration: time.Minute},
+					URL:       "oci://ghcr.io/test/target",
+					Interval:  metav1.Duration{Duration: time.Minute},
+					Reference: initialRef,
 				},
 			}
-			Expect(k8sClient.Create(ctx, differentOCIRepo)).To(Succeed())
+			Expect(k8sClient.Create(ctx, oci)).To(Succeed())
+			// Fetch to get the resource version
+			createdOCI := &sourcev1beta2.OCIRepository{}
+			Expect(k8sClient.Get(ctx, ociRepoNamespacedName, createdOCI)).To(Succeed())
+			return createdOCI
+		}
 
-			By("Adding deployment history to Rollout")
-			rollout.Status.History = []rolloutv1alpha1.DeploymentHistoryEntry{
-				{
-					Version:   "1.0.0",
-					Timestamp: metav1.Now(),
-				},
-			}
-			Expect(k8sClient.Status().Update(ctx, rollout)).To(Succeed())
-
-			By("Reconciling the resources")
-			controllerReconciler := &FluxOCIRepositoryReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
-			}
+		reconcile := func() {
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
+				NamespacedName: rolloutNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
+		}
 
-			By("Verifying that only the matching OCIRepository was updated")
+		It("should update OCIRepository when Rollout has history and annotation matches", func() {
+			By("Creating a Rollout with deployment history")
+			testRollout = createRollout(true)
+
+			By("Creating an OCIRepository with matching annotation")
+			initialRef := &sourcev1beta2.OCIRepositoryRef{Tag: "old-tag", Digest: "sha256:olddigest", SemVer: "1.0.0"}
+			testOCIRepo = createOCIRepository(map[string]string{RolloutNameAnnotation: rolloutName}, initialRef)
+
+			By("Reconciling the Rollout")
+			reconcile()
+
+			By("Verifying the OCIRepository is updated")
 			updatedOCIRepo := &sourcev1beta2.OCIRepository{}
-			err = k8sClient.Get(ctx, types.NamespacedName{
-				Name:      ociRepo.Name,
-				Namespace: namespace,
-			}, updatedOCIRepo)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(updatedOCIRepo.Annotations).NotTo(BeNil())
-			Expect(updatedOCIRepo.Annotations["reconcile.fluxcd.io/requestedAt"]).NotTo(BeEmpty())
+			Expect(k8sClient.Get(ctx, ociRepoNamespacedName, updatedOCIRepo)).To(Succeed())
 
-			updatedDifferentOCIRepo := &sourcev1beta2.OCIRepository{}
-			err = k8sClient.Get(ctx, types.NamespacedName{
-				Name:      differentOCIRepo.Name,
-				Namespace: namespace,
-			}, updatedDifferentOCIRepo)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(updatedDifferentOCIRepo.Annotations).To(BeNil())
+			Expect(updatedOCIRepo.Spec.Reference).NotTo(BeNil())
+			Expect(updatedOCIRepo.Spec.Reference.Tag).To(Equal(newVersion))
+			Expect(updatedOCIRepo.Spec.Reference.Digest).To(BeEmpty())
+			Expect(updatedOCIRepo.Spec.Reference.SemVer).To(BeEmpty())
+			Expect(updatedOCIRepo.Annotations).To(HaveKeyWithValue("reconcile.fluxcd.io/requestedAt", Not(BeEmpty())))
 		})
 
-		It("should not update OCIRepository with different tag", func() {
-			By("Creating an OCIRepository with different tag")
-			differentTagOCIRepo := &sourcev1beta2.OCIRepository{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "different-tag-oci-repo",
-					Namespace: namespace,
-				},
-				Spec: sourcev1beta2.OCIRepositorySpec{
-					URL: "oci://ghcr.io/test/target",
-					Reference: &sourcev1beta2.OCIRepositoryRef{
-						Tag: "stable",
-					},
-					Interval: metav1.Duration{Duration: time.Minute},
-				},
-			}
-			Expect(k8sClient.Create(ctx, differentTagOCIRepo)).To(Succeed())
+		It("should not update OCIRepository if annotation value does not match Rollout name", func() {
+			By("Creating a Rollout with deployment history")
+			testRollout = createRollout(true)
 
-			By("Adding deployment history to Rollout")
-			rollout.Status.History = []rolloutv1alpha1.DeploymentHistoryEntry{
-				{
-					Version:   "1.0.0",
-					Timestamp: metav1.Now(),
-				},
-			}
-			Expect(k8sClient.Status().Update(ctx, rollout)).To(Succeed())
+			By("Creating an OCIRepository with a non-matching annotation value")
+			initialRef := &sourcev1beta2.OCIRepositoryRef{Tag: "initial-tag"}
+			testOCIRepo = createOCIRepository(map[string]string{RolloutNameAnnotation: "another-rollout"}, initialRef)
+			originalVersion := testOCIRepo.ResourceVersion
 
-			By("Reconciling the resources")
-			controllerReconciler := &FluxOCIRepositoryReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
-			}
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(err).NotTo(HaveOccurred())
+			By("Reconciling the Rollout")
+			reconcile()
 
-			By("Verifying that only the matching OCIRepository was updated")
+			By("Verifying the OCIRepository is not modified")
 			updatedOCIRepo := &sourcev1beta2.OCIRepository{}
-			err = k8sClient.Get(ctx, types.NamespacedName{
-				Name:      ociRepo.Name,
-				Namespace: namespace,
-			}, updatedOCIRepo)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(updatedOCIRepo.Annotations).NotTo(BeNil())
-			Expect(updatedOCIRepo.Annotations["reconcile.fluxcd.io/requestedAt"]).NotTo(BeEmpty())
+			Expect(k8sClient.Get(ctx, ociRepoNamespacedName, updatedOCIRepo)).To(Succeed())
+			Expect(updatedOCIRepo.ResourceVersion).To(Equal(originalVersion))
+			Expect(updatedOCIRepo.Spec.Reference.Tag).To(Equal("initial-tag")) // Ensure tag didn't change
+		})
 
-			updatedDifferentTagOCIRepo := &sourcev1beta2.OCIRepository{}
-			err = k8sClient.Get(ctx, types.NamespacedName{
-				Name:      differentTagOCIRepo.Name,
-				Namespace: namespace,
-			}, updatedDifferentTagOCIRepo)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(updatedDifferentTagOCIRepo.Annotations).To(BeNil())
+		It("should not update OCIRepository if annotation is missing", func() {
+			By("Creating a Rollout with deployment history")
+			testRollout = createRollout(true)
+
+			By("Creating an OCIRepository without the rollout annotation")
+			initialRef := &sourcev1beta2.OCIRepositoryRef{Tag: "no-annotation-tag"}
+			testOCIRepo = createOCIRepository(nil, initialRef) // No annotations
+			originalVersion := testOCIRepo.ResourceVersion
+
+			By("Reconciling the Rollout")
+			reconcile()
+
+			By("Verifying the OCIRepository is not modified")
+			updatedOCIRepo := &sourcev1beta2.OCIRepository{}
+			Expect(k8sClient.Get(ctx, ociRepoNamespacedName, updatedOCIRepo)).To(Succeed())
+			Expect(updatedOCIRepo.ResourceVersion).To(Equal(originalVersion))
+			Expect(updatedOCIRepo.Spec.Reference.Tag).To(Equal("no-annotation-tag"))
+		})
+
+		It("should not update OCIRepository if Rollout has no deployment history", func() {
+			By("Creating a Rollout without deployment history")
+			testRollout = createRollout(false)
+
+			By("Creating an OCIRepository with matching annotation")
+			initialRef := &sourcev1beta2.OCIRepositoryRef{Tag: "no-history-tag"}
+			testOCIRepo = createOCIRepository(map[string]string{RolloutNameAnnotation: rolloutName}, initialRef)
+			originalVersion := testOCIRepo.ResourceVersion
+
+			By("Reconciling the Rollout")
+			reconcile()
+
+			By("Verifying the OCIRepository is not modified")
+			updatedOCIRepo := &sourcev1beta2.OCIRepository{}
+			Expect(k8sClient.Get(ctx, ociRepoNamespacedName, updatedOCIRepo)).To(Succeed())
+			Expect(updatedOCIRepo.ResourceVersion).To(Equal(originalVersion))
+			Expect(updatedOCIRepo.Spec.Reference.Tag).To(Equal("no-history-tag"))
+		})
+
+		It("should update OCIRepository correctly if spec.reference is initially nil", func() {
+			By("Creating a Rollout with deployment history")
+			testRollout = createRollout(true)
+
+			By("Creating an OCIRepository with matching annotation and nil spec.reference")
+			testOCIRepo = createOCIRepository(map[string]string{RolloutNameAnnotation: rolloutName}, nil) // Spec.Reference is nil
+
+			By("Reconciling the Rollout")
+			reconcile()
+
+			By("Verifying the OCIRepository is updated and spec.reference initialized")
+			updatedOCIRepo := &sourcev1beta2.OCIRepository{}
+			Expect(k8sClient.Get(ctx, ociRepoNamespacedName, updatedOCIRepo)).To(Succeed())
+
+			Expect(updatedOCIRepo.Spec.Reference).NotTo(BeNil())
+			Expect(updatedOCIRepo.Spec.Reference.Tag).To(Equal(newVersion))
+			Expect(updatedOCIRepo.Spec.Reference.Digest).To(BeEmpty())
+			Expect(updatedOCIRepo.Spec.Reference.SemVer).To(BeEmpty())
+			Expect(updatedOCIRepo.Annotations).To(HaveKeyWithValue("reconcile.fluxcd.io/requestedAt", Not(BeEmpty())))
 		})
 	})
 })

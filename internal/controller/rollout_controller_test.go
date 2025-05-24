@@ -66,7 +66,7 @@ var _ = Describe("Rollout Controller", func() {
 		var registryServer *httptest.Server
 		var registryEndpoint string
 		var releasesRepository string
-		var targetRepository string
+		// var targetRepository string // No longer needed
 		var registryUser string
 		var registryPassword string
 		var bakeTime *metav1.Duration
@@ -85,7 +85,7 @@ var _ = Describe("Rollout Controller", func() {
 			By("setting up the test environment")
 			registryServer, registryEndpoint = setupTestRegistry(registryUser, registryPassword)
 			releasesRepository = fmt.Sprintf("%s/my-app/kubernetes-manifests/my-env/release", registryEndpoint)
-			targetRepository = fmt.Sprintf("%s/my-app/kubernetes-manifests/my-env/deploy", registryEndpoint)
+			// targetRepository = fmt.Sprintf("%s/my-app/kubernetes-manifests/my-env/deploy", registryEndpoint) // No longer needed
 
 			typeNamespacedName = types.NamespacedName{
 				Name:      resourceName,
@@ -102,9 +102,9 @@ var _ = Describe("Rollout Controller", func() {
 					ReleasesRepository: rolloutv1alpha1.Repository{
 						URL: releasesRepository,
 					},
-					TargetRepository: rolloutv1alpha1.Repository{
-						URL: targetRepository,
-					},
+					// TargetRepository: rolloutv1alpha1.Repository{ // Field removed from spec
+					// 	URL: targetRepository,
+					// },
 					ReleaseUpdateInterval: &metav1.Duration{Duration: 0},
 					BakeTime:              bakeTime,
 					HealthCheckSelector:   healthCheckSelector,
@@ -129,12 +129,10 @@ var _ = Describe("Rollout Controller", func() {
 		})
 
 		It("should update deployment history after successful deployment", func() {
-			By("Creating a test deployment image")
-			version_0_1_0_image := pushFakeDeploymentImage(releasesRepository, version0_1_0)
-			_, err := pullImage(releasesRepository, version0_1_0)
+			By("Creating a test deployment image in releases repository")
+			pushFakeDeploymentImage(releasesRepository, version0_1_0)
+			_, err := pullImage(releasesRepository, version0_1_0) // Verify it's in releases repo
 			Expect(err).ShouldNot(HaveOccurred())
-			_, err = pullImage(targetRepository, "latest")
-			Expect(err).Should(HaveOccurred())
 
 			By("Reconciling the resources")
 			controllerReconciler := &RolloutReconciler{
@@ -146,10 +144,11 @@ var _ = Describe("Rollout Controller", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("Verifying that the deployment happened")
-			targetImage, err := pullImage(targetRepository, "latest")
-			Expect(err).ShouldNot(HaveOccurred())
-			Expect(targetImage).To(HaveSameDigestAs(version_0_1_0_image))
+			// Image pushing to target repository is removed.
+			// By("Verifying that the deployment happened")
+			// targetImage, err := pullImage(targetRepository, "latest")
+			// Expect(err).ShouldNot(HaveOccurred())
+			// Expect(targetImage).To(HaveSameDigestAs(version_0_1_0_image))
 
 			By("Verifying that deployment history was updated")
 			updatedRollout := &rolloutv1alpha1.Rollout{}
@@ -161,9 +160,9 @@ var _ = Describe("Rollout Controller", func() {
 			Expect(updatedRollout.Status.History[0].Version).To(Equal(version0_1_0))
 			Expect(updatedRollout.Status.History[0].Timestamp.IsZero()).To(BeFalse())
 
-			By("Creating a second deployment with a new version")
-			version_0_2_0_image := pushFakeDeploymentImage(releasesRepository, version0_2_0)
-			_, err = pullImage(releasesRepository, version0_2_0)
+			By("Creating a second deployment with a new version in releases repository")
+			pushFakeDeploymentImage(releasesRepository, version0_2_0)
+			_, err = pullImage(releasesRepository, version0_2_0) // Verify it's in releases repo
 			Expect(err).ShouldNot(HaveOccurred())
 
 			By("Reconciling the resources again")
@@ -172,10 +171,11 @@ var _ = Describe("Rollout Controller", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("Verifying that the new deployment happened")
-			targetImage, err = pullImage(targetRepository, "latest")
-			Expect(err).ShouldNot(HaveOccurred())
-			Expect(targetImage).To(HaveSameDigestAs(version_0_2_0_image))
+			// Image pushing to target repository is removed.
+			// By("Verifying that the new deployment happened")
+			// targetImage, err = pullImage(targetRepository, "latest")
+			// Expect(err).ShouldNot(HaveOccurred())
+			// Expect(targetImage).To(HaveSameDigestAs(version_0_2_0_image))
 
 			By("Verifying that deployment history was updated with both versions")
 			updatedRollout = &rolloutv1alpha1.Rollout{}
@@ -211,12 +211,11 @@ var _ = Describe("Rollout Controller", func() {
 		})
 
 		It("should respect the history limit", func() {
-			By("Creating a test deployment image")
+			By("Creating a test deployment image in releases repository")
 			pushFakeDeploymentImage(releasesRepository, "0.1.0")
-			_, err := pullImage(releasesRepository, "0.1.0")
+			_, err := pullImage(releasesRepository, "0.1.0") // Verify it's in releases repo
 			Expect(err).ShouldNot(HaveOccurred())
-			_, err = pullImage(targetRepository, "latest")
-			Expect(err).Should(HaveOccurred())
+			// No target repo interaction to check here
 
 			By("Setting a custom history limit of 3")
 			rollout := &rolloutv1alpha1.Rollout{}
@@ -278,6 +277,7 @@ var _ = Describe("Rollout Controller", func() {
 			pushFakeDeploymentImage(releasesRepository, "0.1.0")
 			pushFakeDeploymentImage(releasesRepository, "0.2.0")
 			pushFakeDeploymentImage(releasesRepository, "0.3.0")
+			// Verify images are in releases repo
 			_, err := pullImage(releasesRepository, "0.1.0")
 			Expect(err).ShouldNot(HaveOccurred())
 			_, err = pullImage(releasesRepository, "0.2.0")
@@ -458,11 +458,11 @@ var _ = Describe("Rollout Controller", func() {
 			Expect(readyCondition.Message).To(ContainSubstring("wanted version \"" + version0_3_0 + "\" not found in available releases"))
 		})
 
-		It("should support rollback to a previous version", func() {
-			By("Creating test deployment images")
-			version_0_1_0_image := pushFakeDeploymentImage(releasesRepository, version0_1_0)
+		It("should support rollback to a previous version by updating status history", func() {
+			By("Creating test deployment images in releases repository")
+			pushFakeDeploymentImage(releasesRepository, version0_1_0)
 
-			By("Reconciling the resources to deploy version 0.1.0")
+			By("Reconciling the resources to record deployment of version 0.1.0")
 			controllerReconciler := &RolloutReconciler{
 				Client: k8sClient,
 				Scheme: k8sClient.Scheme(),
@@ -472,33 +472,33 @@ var _ = Describe("Rollout Controller", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("Verifying that version 0.1.0 was deployed")
-			targetImage, err := pullImage(targetRepository, "latest")
-			Expect(err).ShouldNot(HaveOccurred())
-			Expect(targetImage).To(HaveSameDigestAs(version_0_1_0_image))
+			// By("Verifying that version 0.1.0 was deployed")
+			// targetImage, err := pullImage(targetRepository, "latest")
+			// Expect(err).ShouldNot(HaveOccurred())
+			// Expect(targetImage).To(HaveSameDigestAs(version_0_1_0_image))
 
-			By("Verifying deployment history")
+			By("Verifying deployment history shows 0.1.0")
 			updatedRollout := &rolloutv1alpha1.Rollout{}
 			err = k8sClient.Get(ctx, typeNamespacedName, updatedRollout)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(updatedRollout.Status.History).To(HaveLen(1))
 			Expect(updatedRollout.Status.History[0].Version).To(Equal(version0_1_0))
 
-			By("Publishing version 0.2.0")
-			version_0_2_0_image := pushFakeDeploymentImage(releasesRepository, version0_2_0)
+			By("Publishing version 0.2.0 to releases repository")
+			pushFakeDeploymentImage(releasesRepository, version0_2_0)
 
-			By("Reconciling to deploy version 0.2.0")
+			By("Reconciling to record deployment of version 0.2.0")
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("Verifying that version 0.2.0 was deployed")
-			targetImage, err = pullImage(targetRepository, "latest")
-			Expect(err).ShouldNot(HaveOccurred())
-			Expect(targetImage).To(HaveSameDigestAs(version_0_2_0_image))
+			// By("Verifying that version 0.2.0 was deployed")
+			// targetImage, err = pullImage(targetRepository, "latest")
+			// Expect(err).ShouldNot(HaveOccurred())
+			// Expect(targetImage).To(HaveSameDigestAs(version_0_2_0_image))
 
-			By("Verifying deployment history after upgrade")
+			By("Verifying deployment history after upgrade shows 0.2.0 then 0.1.0")
 			err = k8sClient.Get(ctx, typeNamespacedName, updatedRollout)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(updatedRollout.Status.History).To(HaveLen(2))
@@ -518,12 +518,12 @@ var _ = Describe("Rollout Controller", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("Verifying that version 0.1.0 was deployed after rollback")
-			targetImage, err = pullImage(targetRepository, "latest")
-			Expect(err).ShouldNot(HaveOccurred())
-			Expect(targetImage).To(HaveSameDigestAs(version_0_1_0_image))
+			// By("Verifying that version 0.1.0 was deployed after rollback")
+			// targetImage, err = pullImage(targetRepository, "latest")
+			// Expect(err).ShouldNot(HaveOccurred())
+			// Expect(targetImage).To(HaveSameDigestAs(version_0_1_0_image))
 
-			By("Verifying deployment history after rollback")
+			By("Verifying deployment history after rollback shows 0.1.0, then 0.2.0, then 0.1.0")
 			err = k8sClient.Get(ctx, typeNamespacedName, updatedRollout)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(updatedRollout.Status.History).To(HaveLen(3))
@@ -538,14 +538,19 @@ var _ = Describe("Rollout Controller", func() {
 			controllerReconciler := &RolloutReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
-			targetImage, err := pullImage(targetRepository, "latest")
-			Expect(err).ShouldNot(HaveOccurred())
-			allowedImage, err := pullImage(releasesRepository, version0_2_0)
-			Expect(err).ShouldNot(HaveOccurred())
-			Expect(targetImage).To(HaveSameDigestAs(allowedImage))
+			// targetImage, err := pullImage(targetRepository, "latest")
+			// Expect(err).ShouldNot(HaveOccurred())
+			// allowedImage, err := pullImage(releasesRepository, version0_2_0)
+			// Expect(err).ShouldNot(HaveOccurred())
+			// Expect(targetImage).To(HaveSameDigestAs(allowedImage))
+			updatedRollout := &rolloutv1alpha1.Rollout{}
+			err = k8sClient.Get(ctx, typeNamespacedName, updatedRollout)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(updatedRollout.Status.History).To(HaveLen(1))
+			Expect(updatedRollout.Status.History[0].Version).To(Equal(version0_2_0))
 		})
 
-		It("should only deploy versions allowed by a passing gate with allowedVersions", func() {
+		It("should only record deployment of versions allowed by a passing gate with allowedVersions", func() {
 			pushFakeDeploymentImage(releasesRepository, version0_1_0)
 			pushFakeDeploymentImage(releasesRepository, version0_2_0)
 			pushFakeDeploymentImage(releasesRepository, version0_3_0)
@@ -563,11 +568,11 @@ var _ = Describe("Rollout Controller", func() {
 			controllerReconciler := &RolloutReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
-			targetImage, err := pullImage(targetRepository, "latest")
-			Expect(err).ShouldNot(HaveOccurred())
-			allowedImage, err := pullImage(releasesRepository, version0_2_0)
-			Expect(err).ShouldNot(HaveOccurred())
-			Expect(targetImage).To(HaveSameDigestAs(allowedImage))
+			// targetImage, err := pullImage(targetRepository, "latest")
+			// Expect(err).ShouldNot(HaveOccurred())
+			// allowedImage, err := pullImage(releasesRepository, version0_2_0)
+			// Expect(err).ShouldNot(HaveOccurred())
+			// Expect(targetImage).To(HaveSameDigestAs(allowedImage))
 			updatedRollout := &rolloutv1alpha1.Rollout{}
 			err = k8sClient.Get(ctx, typeNamespacedName, updatedRollout)
 			Expect(err).NotTo(HaveOccurred())
@@ -635,11 +640,11 @@ var _ = Describe("Rollout Controller", func() {
 			controllerReconciler := &RolloutReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
-			targetImage, err := pullImage(targetRepository, "latest")
-			Expect(err).ShouldNot(HaveOccurred())
-			allowedImage, err := pullImage(releasesRepository, version0_2_0)
-			Expect(err).ShouldNot(HaveOccurred())
-			Expect(targetImage).To(HaveSameDigestAs(allowedImage))
+			// targetImage, err := pullImage(targetRepository, "latest")
+			// Expect(err).ShouldNot(HaveOccurred())
+			// allowedImage, err := pullImage(releasesRepository, version0_2_0)
+			// Expect(err).ShouldNot(HaveOccurred())
+			// Expect(targetImage).To(HaveSameDigestAs(allowedImage))
 			updatedRollout := &rolloutv1alpha1.Rollout{}
 			err = k8sClient.Get(ctx, typeNamespacedName, updatedRollout)
 			Expect(err).NotTo(HaveOccurred())
@@ -695,14 +700,19 @@ var _ = Describe("Rollout Controller", func() {
 			controllerReconciler := &RolloutReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
-			targetImage, err := pullImage(targetRepository, "latest")
-			Expect(err).ShouldNot(HaveOccurred())
-			allowedImage, err := pullImage(releasesRepository, version0_1_0)
-			Expect(err).ShouldNot(HaveOccurred())
-			Expect(targetImage).To(HaveSameDigestAs(allowedImage))
+			// targetImage, err := pullImage(targetRepository, "latest")
+			// Expect(err).ShouldNot(HaveOccurred())
+			// allowedImage, err := pullImage(releasesRepository, version0_1_0)
+			// Expect(err).ShouldNot(HaveOccurred())
+			// Expect(targetImage).To(HaveSameDigestAs(allowedImage))
+			updatedRollout := &rolloutv1alpha1.Rollout{}
+			err = k8sClient.Get(ctx, typeNamespacedName, updatedRollout)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(updatedRollout.Status.History).To(HaveLen(1))
+			Expect(updatedRollout.Status.History[0].Version).To(Equal(version0_1_0))
 		})
 
-		It("should deploy the latest release if a single passing gate has no allowedVersions", func() {
+		It("should record deployment of the latest release if a single passing gate has no allowedVersions", func() {
 			pushFakeDeploymentImage(releasesRepository, version0_1_0)
 			pushFakeDeploymentImage(releasesRepository, version0_2_0)
 			gate := &rolloutv1alpha1.RolloutGate{
@@ -719,14 +729,19 @@ var _ = Describe("Rollout Controller", func() {
 			controllerReconciler := &RolloutReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
-			targetImage, err := pullImage(targetRepository, "latest")
-			Expect(err).ShouldNot(HaveOccurred())
-			allowedImage, err := pullImage(releasesRepository, version0_2_0)
-			Expect(err).ShouldNot(HaveOccurred())
-			Expect(targetImage).To(HaveSameDigestAs(allowedImage))
+			// targetImage, err := pullImage(targetRepository, "latest")
+			// Expect(err).ShouldNot(HaveOccurred())
+			// allowedImage, err := pullImage(releasesRepository, version0_2_0)
+			// Expect(err).ShouldNot(HaveOccurred())
+			// Expect(targetImage).To(HaveSameDigestAs(allowedImage))
+			updatedRollout := &rolloutv1alpha1.Rollout{}
+			err = k8sClient.Get(ctx, typeNamespacedName, updatedRollout)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(updatedRollout.Status.History).To(HaveLen(1))
+			Expect(updatedRollout.Status.History[0].Version).To(Equal(version0_2_0))
 		})
 
-		It("should block deployment if one of multiple gates is not passing", func() {
+		It("should block recording deployment if one of multiple gates is not passing", func() {
 			pushFakeDeploymentImage(releasesRepository, version0_1_0)
 			pushFakeDeploymentImage(releasesRepository, version0_2_0)
 			gate1 := &rolloutv1alpha1.RolloutGate{
@@ -792,24 +807,23 @@ var _ = Describe("Rollout Controller", func() {
 				Expect(k8sClient.Create(ctx, healthCheck)).To(Succeed())
 			})
 
-			It("should block new deployment if bake is in progress", func() {
-				By("Pushing and deploying an initial image")
-				img1 := pushFakeDeploymentImage(releasesRepository, version0_1_0)
+			It("should block new version recording if bake is in progress", func() {
+				By("Pushing and recording deployment of an initial image")
+				pushFakeDeploymentImage(releasesRepository, version0_1_0)
 				controllerReconciler := &RolloutReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Clock: fakeClock}
 				_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 				Expect(err).NotTo(HaveOccurred())
-				targetImage, err := pullImage(targetRepository, "latest")
-				Expect(err).ShouldNot(HaveOccurred())
-				Expect(targetImage).To(HaveSameDigestAs(img1))
 
-				By("Verifying initial bake times were set")
+				By("Verifying initial bake times were set and history updated")
 				rollout := &rolloutv1alpha1.Rollout{}
 				Expect(k8sClient.Get(ctx, typeNamespacedName, rollout)).To(Succeed())
+				Expect(rollout.Status.History).To(HaveLen(1))
+				Expect(rollout.Status.History[0].Version).To(Equal(version0_1_0))
 				Expect(rollout.Status.BakeStartTime.Time).To(Equal(fakeClock.Now()))
 				Expect(rollout.Status.BakeEndTime.Time).To(Equal(fakeClock.Now().Add(5 * time.Minute)))
 				Expect(*rollout.Status.History[0].BakeStatus).To(Equal(rolloutv1alpha1.BakeStatusInProgress))
 
-				By("Pushing a new deployment image")
+				By("Pushing a new deployment image to releases repository")
 				pushFakeDeploymentImage(releasesRepository, version0_2_0)
 
 				By("Advancing clock within bake window and ensuring no health errors")
@@ -820,30 +834,25 @@ var _ = Describe("Rollout Controller", func() {
 				_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 				Expect(err).NotTo(HaveOccurred())
 
-				By("Verifying new release was not deployed")
-				targetImage, err = pullImage(targetRepository, "latest")
-				Expect(err).ShouldNot(HaveOccurred())
-				Expect(targetImage).To(HaveSameDigestAs(img1)) // Should still be img1
+				By("Verifying new release was not recorded in history")
+				Expect(k8sClient.Get(ctx, typeNamespacedName, rollout)).To(Succeed())
+				Expect(rollout.Status.History).To(HaveLen(1)) // Should still be 1
+				Expect(rollout.Status.History[0].Version).To(Equal(version0_1_0))
 			})
 
-			It("should block new deployment if previous bake failed", func() {
-				By("Pushing and deploying an initial image")
-				img1 := pushFakeDeploymentImage(releasesRepository, version0_1_0)
+			It("should block new version recording if previous bake failed", func() {
+				By("Pushing and recording deployment of an initial image")
+				pushFakeDeploymentImage(releasesRepository, version0_1_0)
 				controllerReconciler := &RolloutReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Clock: fakeClock}
 				_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 				Expect(err).NotTo(HaveOccurred())
-				targetImage, err := pullImage(targetRepository, "latest")
-				Expect(err).ShouldNot(HaveOccurred())
-				Expect(targetImage).To(HaveSameDigestAs(img1))
 
 				By("Verifying initial bake times were set")
 				rollout := &rolloutv1alpha1.Rollout{}
 				Expect(k8sClient.Get(ctx, typeNamespacedName, rollout)).To(Succeed())
-				Expect(rollout.Status.BakeStartTime.Time).To(Equal(fakeClock.Now()))
-				Expect(rollout.Status.BakeEndTime.Time).To(Equal(fakeClock.Now().Add(5 * time.Minute)))
 				Expect(*rollout.Status.History[0].BakeStatus).To(Equal(rolloutv1alpha1.BakeStatusInProgress))
 
-				By("Pushing a new deployment image")
+				By("Pushing a new deployment image to releases repository")
 				pushFakeDeploymentImage(releasesRepository, version0_2_0)
 
 				By("Advancing clock within bake window and simulating health check error")
@@ -854,33 +863,27 @@ var _ = Describe("Rollout Controller", func() {
 				_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 				Expect(err).NotTo(HaveOccurred())
 
-				By("Verifying bake status is Failed and new release was not deployed")
+				By("Verifying bake status is Failed and new release was not recorded in history")
 				Expect(k8sClient.Get(ctx, typeNamespacedName, rollout)).To(Succeed())
 				Expect(*rollout.Status.History[0].BakeStatus).To(Equal(rolloutv1alpha1.BakeStatusFailed))
-				targetImage, err = pullImage(targetRepository, "latest")
-				Expect(err).ShouldNot(HaveOccurred())
-				Expect(targetImage).To(HaveSameDigestAs(img1)) // Should still be img1
+				Expect(rollout.Status.History).To(HaveLen(1)) // Should still be 1
+				Expect(rollout.Status.History[0].Version).To(Equal(version0_1_0))
 			})
 
-			It("should allow new deployment if previous bake succeeded", func() {
-				By("Pushing and deploying an initial image")
-				img1 := pushFakeDeploymentImage(releasesRepository, version0_1_0)
+			It("should allow recording new version if previous bake succeeded", func() {
+				By("Pushing and recording deployment of an initial image")
+				pushFakeDeploymentImage(releasesRepository, version0_1_0)
 				controllerReconciler := &RolloutReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Clock: fakeClock}
 				_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 				Expect(err).NotTo(HaveOccurred())
-				targetImage, err := pullImage(targetRepository, "latest")
-				Expect(err).ShouldNot(HaveOccurred())
-				Expect(targetImage).To(HaveSameDigestAs(img1))
 
 				By("Verifying initial bake times were set")
 				rollout := &rolloutv1alpha1.Rollout{}
 				Expect(k8sClient.Get(ctx, typeNamespacedName, rollout)).To(Succeed())
-				Expect(rollout.Status.BakeStartTime.Time).To(Equal(fakeClock.Now()))
-				Expect(rollout.Status.BakeEndTime.Time).To(Equal(fakeClock.Now().Add(5 * time.Minute)))
 				Expect(*rollout.Status.History[0].BakeStatus).To(Equal(rolloutv1alpha1.BakeStatusInProgress))
 
-				By("Pushing a new deployment image")
-				img2 := pushFakeDeploymentImage(releasesRepository, version0_2_0)
+				By("Pushing a new deployment image to releases repository")
+				pushFakeDeploymentImage(releasesRepository, version0_2_0)
 
 				By("Advancing clock past bake window and ensuring no recent health errors")
 				healthCheck.Status.LastErrorTime = &metav1.Time{Time: fakeClock.Now().Add(-1 * time.Minute)} // Error before bake start
@@ -890,35 +893,29 @@ var _ = Describe("Rollout Controller", func() {
 				_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 				Expect(err).NotTo(HaveOccurred())
 
-				By("Verifying bake status is Succeeded and new release was deployed")
+				By("Verifying bake status is Succeeded and new release was recorded in history")
 				Expect(k8sClient.Get(ctx, typeNamespacedName, rollout)).To(Succeed())
 				Expect(rollout.Status.History).To(HaveLen(2))
+				Expect(rollout.Status.History[0].Version).To(Equal(version0_2_0)) // New version recorded
 				Expect(*rollout.Status.History[0].BakeStatus).To(Equal(rolloutv1alpha1.BakeStatusInProgress))
+				Expect(rollout.Status.History[1].Version).To(Equal(version0_1_0)) // Old version
 				Expect(*rollout.Status.History[1].BakeStatus).To(Equal(rolloutv1alpha1.BakeStatusSucceeded))
-				targetImage, err = pullImage(targetRepository, "latest")
-				Expect(err).ShouldNot(HaveOccurred())
-				Expect(targetImage).To(HaveSameDigestAs(img2)) // Should be img2
 			})
 
-			It("should allow wantedVersion override regardless of bake status", func() {
-				By("Pushing and deploying an initial image")
-				img1 := pushFakeDeploymentImage(releasesRepository, version0_1_0)
+			It("should allow wantedVersion override and record in history regardless of bake status", func() {
+				By("Pushing and recording deployment of an initial image")
+				pushFakeDeploymentImage(releasesRepository, version0_1_0)
 				controllerReconciler := &RolloutReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Clock: fakeClock}
 				_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 				Expect(err).NotTo(HaveOccurred())
-				targetImage, err := pullImage(targetRepository, "latest")
-				Expect(err).ShouldNot(HaveOccurred())
-				Expect(targetImage).To(HaveSameDigestAs(img1))
 
 				By("Verifying initial bake times were set")
 				rollout := &rolloutv1alpha1.Rollout{}
 				Expect(k8sClient.Get(ctx, typeNamespacedName, rollout)).To(Succeed())
-				Expect(rollout.Status.BakeStartTime.Time).To(Equal(fakeClock.Now()))
-				Expect(rollout.Status.BakeEndTime.Time).To(Equal(fakeClock.Now().Add(5 * time.Minute)))
 				Expect(*rollout.Status.History[0].BakeStatus).To(Equal(rolloutv1alpha1.BakeStatusInProgress))
 
-				By("Pushing a new deployment image")
-				img2 := pushFakeDeploymentImage(releasesRepository, version0_2_0)
+				By("Pushing a new deployment image to releases repository")
+				pushFakeDeploymentImage(releasesRepository, version0_2_0)
 
 				By("Setting wantedVersion and advancing clock within bake window")
 				rollout.Spec.WantedVersion = ptrutil.To(version0_2_0)
@@ -930,31 +927,26 @@ var _ = Describe("Rollout Controller", func() {
 				_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 				Expect(err).NotTo(HaveOccurred())
 
-				By("Verifying the wanted version was deployed")
-				targetImage, err = pullImage(targetRepository, "latest")
-				Expect(err).ShouldNot(HaveOccurred())
-				Expect(targetImage).To(HaveSameDigestAs(img2)) // Should be img2
+				By("Verifying the wanted version was recorded in history")
+				Expect(k8sClient.Get(ctx, typeNamespacedName, rollout)).To(Succeed())
+				Expect(rollout.Status.History).To(HaveLen(2))
+				Expect(rollout.Status.History[0].Version).To(Equal(version0_2_0)) // Wanted version
 			})
 
-			It("should allow new deployment if bake succeeded and LastErrorTime is nil", func() {
-				By("Pushing and deploying an initial image")
-				img1 := pushFakeDeploymentImage(releasesRepository, version0_1_0)
+			It("should allow recording new version if bake succeeded and LastErrorTime is nil", func() {
+				By("Pushing and recording deployment of an initial image")
+				pushFakeDeploymentImage(releasesRepository, version0_1_0)
 				controllerReconciler := &RolloutReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Clock: fakeClock}
 				_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 				Expect(err).NotTo(HaveOccurred())
-				targetImage, err := pullImage(targetRepository, "latest")
-				Expect(err).ShouldNot(HaveOccurred())
-				Expect(targetImage).To(HaveSameDigestAs(img1))
 
 				By("Verifying initial bake times were set")
 				rollout := &rolloutv1alpha1.Rollout{}
 				Expect(k8sClient.Get(ctx, typeNamespacedName, rollout)).To(Succeed())
-				Expect(rollout.Status.BakeStartTime.Time).To(Equal(fakeClock.Now()))
-				Expect(rollout.Status.BakeEndTime.Time).To(Equal(fakeClock.Now().Add(5 * time.Minute)))
 				Expect(*rollout.Status.History[0].BakeStatus).To(Equal(rolloutv1alpha1.BakeStatusInProgress))
 
-				By("Pushing a new deployment image")
-				img2 := pushFakeDeploymentImage(releasesRepository, version0_2_0)
+				By("Pushing a new deployment image to releases repository")
+				pushFakeDeploymentImage(releasesRepository, version0_2_0)
 
 				By("Advancing clock past bake window and ensuring LastErrorTime is nil")
 				healthCheck.Status.LastErrorTime = nil
@@ -964,37 +956,36 @@ var _ = Describe("Rollout Controller", func() {
 				_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 				Expect(err).NotTo(HaveOccurred())
 
-				By("Verifying bake status is Succeeded and new release was deployed")
+				By("Verifying bake status is Succeeded and new release was recorded in history")
 				Expect(k8sClient.Get(ctx, typeNamespacedName, rollout)).To(Succeed())
 				Expect(rollout.Status.History).To(HaveLen(2))
-				Expect(*rollout.Status.History[0].BakeStatus).To(Equal(rolloutv1alpha1.BakeStatusInProgress)) // New deployment
-				Expect(*rollout.Status.History[1].BakeStatus).To(Equal(rolloutv1alpha1.BakeStatusSucceeded))  // Previous deployment
-				targetImage, err = pullImage(targetRepository, "latest")
-				Expect(err).ShouldNot(HaveOccurred())
-				Expect(targetImage).To(HaveSameDigestAs(img2)) // Should be img2
+				Expect(rollout.Status.History[0].Version).To(Equal(version0_2_0)) // New version
+				Expect(*rollout.Status.History[0].BakeStatus).To(Equal(rolloutv1alpha1.BakeStatusInProgress)) // New deployment's bake status
+				Expect(rollout.Status.History[1].Version).To(Equal(version0_1_0)) // Old version
+				Expect(*rollout.Status.History[1].BakeStatus).To(Equal(rolloutv1alpha1.BakeStatusSucceeded))  // Previous deployment's bake status
 			})
 		})
 
 		When("using an authenticated registry", func() {
 
 			var secret *corev1.Secret
-			var craneAuth crane.Option
+			var craneAuthForReleases crane.Option // Renamed for clarity
 
 			BeforeEach(func() {
 				registryUser = "testuser"
 				registryPassword = "testpassword"
-				craneAuth = crane.WithAuth(authn.FromConfig(authn.AuthConfig{
+				craneAuthForReleases = crane.WithAuth(authn.FromConfig(authn.AuthConfig{ // Auth for releases repo
 					Username: registryUser,
 					Password: registryPassword,
 				}))
 			})
 
 			JustBeforeEach(func() {
-				By("Creating a test docker config secret")
+				By("Creating a test docker config secret for releases repository")
 				auth := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", registryUser, registryPassword)))
 				dockerConfig := map[string]any{
 					"auths": map[string]any{
-						registryEndpoint: map[string]string{
+						registryEndpoint: map[string]string{ // Assuming registryEndpoint is for releases repo
 							"auth": auth,
 						},
 					},
@@ -1004,7 +995,7 @@ var _ = Describe("Rollout Controller", func() {
 
 				secret = &corev1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-docker-config",
+						Name:      "test-docker-config-releases", // Clarified name
 						Namespace: namespace,
 					},
 					Type: corev1.SecretTypeDockerConfigJson,
@@ -1014,7 +1005,7 @@ var _ = Describe("Rollout Controller", func() {
 				}
 				Expect(k8sClient.Create(ctx, secret)).To(Succeed())
 
-				By("Updating rollout to use authentication")
+				By("Updating rollout to use authentication for releases repository")
 				rollout := &rolloutv1alpha1.Rollout{}
 				err = k8sClient.Get(ctx, typeNamespacedName, rollout)
 				Expect(err).NotTo(HaveOccurred())
@@ -1022,16 +1013,14 @@ var _ = Describe("Rollout Controller", func() {
 				rollout.Spec.ReleasesRepository.Auth = &corev1.LocalObjectReference{
 					Name: secret.Name,
 				}
-				rollout.Spec.TargetRepository.Auth = &corev1.LocalObjectReference{
-					Name: secret.Name,
-				}
+				// No TargetRepository.Auth to set
 				Expect(k8sClient.Update(ctx, rollout)).To(Succeed())
 			})
 
-			It("should successfully deploy with valid credentials", func() {
-				By("Creating test deployment images")
-				version_0_1_0_image := pushFakeDeploymentImage(releasesRepository, version0_1_0, craneAuth)
-				_, err := pullImage(releasesRepository, version0_1_0, craneAuth)
+			It("should successfully record deployment history with valid releases repository credentials", func() {
+				By("Creating test deployment images in releases repository")
+				pushFakeDeploymentImage(releasesRepository, version0_1_0, craneAuthForReleases)
+				_, err := pullImage(releasesRepository, version0_1_0, craneAuthForReleases) // Verify image in releases
 				Expect(err).ShouldNot(HaveOccurred())
 
 				By("Reconciling the resources")
@@ -1044,10 +1033,10 @@ var _ = Describe("Rollout Controller", func() {
 				})
 				Expect(err).NotTo(HaveOccurred())
 
-				By("Verifying that the deployment happened with authentication")
-				targetImage, err := pullImage(targetRepository, "latest", craneAuth)
-				Expect(err).ShouldNot(HaveOccurred())
-				Expect(targetImage).To(HaveSameDigestAs(version_0_1_0_image))
+				// By("Verifying that the deployment happened with authentication") // No target deployment to check
+				// targetImage, err := pullImage(targetRepository, "latest", craneAuth)
+				// Expect(err).ShouldNot(HaveOccurred())
+				// Expect(targetImage).To(HaveSameDigestAs(version_0_1_0_image))
 
 				By("Verifying that deployment history was updated")
 				updatedRollout := &rolloutv1alpha1.Rollout{}
@@ -1059,16 +1048,16 @@ var _ = Describe("Rollout Controller", func() {
 				Expect(updatedRollout.Status.History[0].Version).To(Equal(version0_1_0))
 			})
 
-			It("should fail with invalid credentials", func() {
-				By("Creating test deployment images")
-				pushFakeDeploymentImage(releasesRepository, version0_1_0, craneAuth)
-				_, err := pullImage(releasesRepository, version0_1_0, craneAuth)
-				Expect(err).ShouldNot(HaveOccurred())
+			It("should fail to list releases with invalid releases repository credentials", func() {
+				By("Creating test deployment images (this might fail if auth is already bad, or succeed if registry allows unauth push but not pull)")
+				// Try pushing with valid auth first to ensure image exists for listing attempt
+				validCraneAuth := crane.WithAuth(authn.FromConfig(authn.AuthConfig{Username: registryUser, Password: registryPassword}))
+				pushFakeDeploymentImage(releasesRepository, version0_1_0, validCraneAuth)
 
-				By("Updating secret with incorrect credentials")
+				By("Updating secret with incorrect credentials for releases repository")
 				incorrectConfig := map[string]any{
 					"auths": map[string]any{
-						registryEndpoint: map[string]any{
+						registryEndpoint: map[string]any{ // Assuming registryEndpoint is for releases repo
 							"auth": base64.StdEncoding.EncodeToString([]byte("invaliduser:invalidpassword")),
 						},
 					},
@@ -1079,25 +1068,33 @@ var _ = Describe("Rollout Controller", func() {
 				secret.Data[".dockerconfigjson"] = incorrectConfigJSON
 				Expect(k8sClient.Update(ctx, secret)).To(Succeed())
 
-				By("Reconciling with incorrect credentials")
+				By("Reconciling with incorrect releases repository credentials")
 				controllerReconciler := &RolloutReconciler{
 					Client: k8sClient,
 					Scheme: k8sClient.Scheme(),
 				}
+				// Expect reconcile to fail during updateAvailableReleases (crane.ListTags)
 				_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
 					NamespacedName: typeNamespacedName,
 				})
-				Expect(err).To(HaveOccurred())
+				Expect(err).To(HaveOccurred()) // Error from crane.ListTags due to auth
+				Expect(err.Error()).To(ContainSubstring("UNAUTHORIZED")) // Or similar, depending on registry error
 
 				By("Verifying that the rollout failed with appropriate condition")
 				updatedRollout := &rolloutv1alpha1.Rollout{}
 				err = k8sClient.Get(ctx, typeNamespacedName, updatedRollout)
-				Expect(err).NotTo(HaveOccurred())
+				Expect(err).NotTo(HaveOccurred()) // Controller should still update status on error
 
 				readyCondition := meta.FindStatusCondition(updatedRollout.Status.Conditions, rolloutv1alpha1.RolloutReady)
 				Expect(readyCondition).NotTo(BeNil())
 				Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
-				Expect(readyCondition.Reason).To(Equal("RolloutFailed"))
+				Expect(readyCondition.Reason).To(Equal("RolloutFailed")) // This is the generic reason set by updateRolloutStatusOnError
+				// The message might be specific to "failed to list tags" or "authentication options"
+				Expect(readyCondition.Message).To(SatisfyAny(
+					ContainSubstring("failed to list tags"),
+					ContainSubstring("authentication options"),
+					ContainSubstring("UNAUTHORIZED"), // If crane error propagates
+				))
 			})
 		})
 	})
@@ -1159,48 +1156,10 @@ func (f *FakeClock) Add(d time.Duration) {
 
 // HaveSameDigestAs Gomega Matcher
 
-var _ gomegaTypes.GomegaMatcher = &ImageDigestMatcher{}
-
-type ImageDigestMatcher struct {
-	expected registryv1.Image
-}
-
-func HaveSameDigestAs(expected registryv1.Image) gomegaTypes.GomegaMatcher {
-	return &ImageDigestMatcher{
-		expected: expected,
-	}
-}
-
-func (matcher *ImageDigestMatcher) Match(actual any) (success bool, err error) {
-	actualImage, ok := actual.(registryv1.Image)
-	if !ok {
-		return false, fmt.Errorf("HaveSameDigestAs matcher expects a registryv1.Image")
-	}
-
-	actualDigest, err := actualImage.Digest()
-	if err != nil {
-		return false, fmt.Errorf("Failed to get digest for actual image: %v", err)
-	}
-
-	expectedDigest, err := matcher.expected.Digest()
-	if err != nil {
-		// Treat error in expected digest calculation as a test setup error
-		return false, fmt.Errorf("Failed to get digest for expected image: %v", err)
-	}
-
-	return actualDigest == expectedDigest, nil
-}
-
-func (matcher *ImageDigestMatcher) FailureMessage(actual interface{}) (message string) {
-	actualImage, _ := actual.(registryv1.Image)
-	actualDigest, _ := actualImage.Digest()
-	expectedDigest, _ := matcher.expected.Digest()
-	return fmt.Sprintf("Expected digest\n\t%s\nto equal\n\t%s", actualDigest, expectedDigest)
-}
-
-func (matcher *ImageDigestMatcher) NegatedFailureMessage(actual interface{}) (message string) {
-	actualImage, _ := actual.(registryv1.Image)
-	actualDigest, _ := actualImage.Digest()
-	expectedDigest, _ := matcher.expected.Digest()
-	return fmt.Sprintf("Expected digest\n\t%s\nnot to equal\n\t%s", actualDigest, expectedDigest)
-}
+// ImageDigestMatcher is no longer needed as we don't compare target images.
+// var _ gomegaTypes.GomegaMatcher = &ImageDigestMatcher{}
+// type ImageDigestMatcher struct { ... }
+// func HaveSameDigestAs(...) gomegaTypes.GomegaMatcher { ... }
+// func (matcher *ImageDigestMatcher) Match(...) (success bool, err error) { ... }
+// func (matcher *ImageDigestMatcher) FailureMessage(...) (message string) { ... }
+// func (matcher *ImageDigestMatcher) NegatedFailureMessage(...) (message string) { ... }

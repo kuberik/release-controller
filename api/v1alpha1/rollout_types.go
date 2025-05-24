@@ -28,11 +28,6 @@ type RolloutSpec struct {
 	// +required
 	ReleasesRepository Repository `json:"releasesRepository,omitempty"`
 
-	// TargetRepository specifies the path where releases should be deployed to
-	// +kubebuilder:validation:Required
-	// +required
-	TargetRepository Repository `json:"targetRepository,omitempty"`
-
 	// WantedVersion specifies a specific version to deploy, overriding the automatic version selection
 	// +optional
 	WantedVersion *string `json:"wantedVersion,omitempty"`
