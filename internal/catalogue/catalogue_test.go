@@ -375,3 +375,12 @@ func TestWalkAdmitsStubAfterMaxAttempts(t *testing.T) {
 		}
 	}
 }
+
+func TestNegativeBudgetResolvesNothing(t *testing.T) {
+	r := newReg(10)
+	now := day0.Add(12 * 24 * time.Hour)
+	res := Admit(State{}, r.refs(), r.cfg(now, 0, 3, -1))
+	if len(r.resolved) != 0 || len(res.Admitted) != 0 || res.Leftover == 0 {
+		t.Fatalf("a spent budget must resolve nothing: resolved %d admitted %d leftover %d", len(r.resolved), len(res.Admitted), res.Leftover)
+	}
+}

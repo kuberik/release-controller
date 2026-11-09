@@ -712,6 +712,31 @@ var _ = Describe("ReleaseSource Controller (fake source)", func() {
 		Expect(n).To(Equal(2))
 	})
 
+	It("minor 4: a repair that uses the whole budget leaves admission none, never unlimited", func() {
+		create(nil)
+		fake.addN(0, 3)
+		sync() // 0..2 admitted
+		fake.unresolved[fakeTag(3)] = true
+		fake.addN(3, 4)
+		sync() // tag 3 stored as an unresolved stub
+		fake.unresolved[fakeTag(3)] = false
+		fake.addN(4, 12)
+		clock = clock.Add(2 * time.Hour) // the stub's backoff has expired
+		r.MaxResolvesPerSync = 1
+		before := fake.resolves
+		sync()
+		Expect(fake.resolves-before).To(BeNumerically("<=", 1), "budget 1 must never be exceeded")
+		Expect(getRS().Status.Count).To(BeNumerically("<=", 4))
+		// it still drains, one resolve per sync
+		for i := 0; i < 20; i++ {
+			before = fake.resolves
+			sync()
+			Expect(fake.resolves-before).To(BeNumerically("<=", 1))
+			clock = clock.Add(time.Minute)
+		}
+		Expect(getRS().Status.Count).To(Equal(int32(12)))
+	})
+
 	It("minor 2: a changed effective policy/filter fingerprint rebuilds the catalogue", func() {
 		create(nil)
 		fake.fp = "aaaa"

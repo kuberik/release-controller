@@ -410,10 +410,14 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		minTag = catalogue[0].Tag
 	}
 	walkAfter := mem.walk.After(minTag)
+	admitBudget := budget - used
+	if admitBudget <= 0 {
+		admitBudget = -1 // spent by repairs; 0 would mean unlimited
+	}
 	res := cat.Admit(cat.State{Catalogue: catalogue, BackfillComplete: st.BackfillComplete}, dres.Refs, cat.Config{
 		Less:      src.Less,
 		Resolve:   resolver,
-		Budget:    budget - used,
+		Budget:    admitBudget,
 		Days:      retDays,
 		MinCount:  int(minCount),
 		Now:       now,

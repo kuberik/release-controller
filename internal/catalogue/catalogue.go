@@ -66,7 +66,8 @@ type State struct {
 type Config struct {
 	Less    func(a, b source.Release) bool
 	Resolve ResolveFunc
-	// Budget bounds the Resolve calls of one Admit.
+	// Budget bounds the Resolve calls of one Admit. Zero means unlimited, a
+	// negative value means none (the caller's budget is spent).
 	Budget int
 	// Days is the retention window; 0 means the window never ends, so the
 	// backfill walks every tag.
@@ -189,8 +190,11 @@ func Admit(st State, refs []source.Ref, cfg Config) Result {
 	sort.SliceStable(below, func(i, j int) bool { return lt(cfg.Less, stub(below[j]), stub(below[i])) })
 
 	budget := cfg.Budget
-	if budget <= 0 {
+	switch {
+	case budget == 0:
 		budget = 1 << 30
+	case budget < 0:
+		budget = 0
 	}
 	// resolve calls the source and normalises the release; it records nothing.
 	resolve := func(ref source.Ref) (v1alpha1.Release, string) {
