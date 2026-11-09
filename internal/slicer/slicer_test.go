@@ -229,7 +229,7 @@ func TestDuplicateKeepsOlder(t *testing.T) {
 func TestNextIndexRaisedAboveExisting(t *testing.T) {
 	c := cfg(1)
 	s := Compute(Input{New: []v1alpha1.Release{rel("a", 1)}}, c).Final // sealed 00000
-	c.NextIndex = 0                                                      // status lost
+	c.NextIndex = 0                                                    // status lost
 	p := Compute(Input{Existing: s, New: []v1alpha1.Release{rel("b", 2)}}, c)
 	if p.Creates[0].Name != "src-00001" {
 		t.Fatal(p.Creates[0].Name)
