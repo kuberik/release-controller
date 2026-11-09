@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -321,9 +320,11 @@ func TestResolveBoundsFailClosed(t *testing.T) {
 
 	for _, tag := range []string{"toomany", "longkey", "longval"} {
 		rel, err := s.Resolve(context.Background(), source.Ref{Tag: tag})
-		var rej *MetadataRejectedError
-		if !errors.As(err, &rej) || rej.Tag != tag {
-			t.Fatalf("%s: err=%v", tag, err)
+		if err != nil {
+			t.Fatalf("%s: bounds violation must not be an error: %v", tag, err)
+		}
+		if msg, ok := s.Rejection(tag); !ok || !strings.Contains(msg, tag) {
+			t.Fatalf("%s: rejection not recorded: %q", tag, msg)
 		}
 		if !rel.MetadataUnresolved || rel.Digest == nil || rel.Requires != nil || rel.Tag != tag {
 			t.Fatalf("%s: %+v", tag, rel)
@@ -375,7 +376,7 @@ func TestIndexDigestAndArtifact(t *testing.T) {
 	if rel.Version == nil || *rel.Version != "idx-1" {
 		t.Fatalf("%+v", rel)
 	}
-	am, err := s.Artifact(context.Background(), "multi")
+	am, err := s.Artifact(context.Background(), source.Release{Tag: "multi"})
 	if err != nil || am.Type != mtIndex || am.Title != "T" {
 		t.Fatalf("%+v %v", am, err)
 	}
@@ -402,16 +403,16 @@ func TestArtifactMetadata(t *testing.T) {
 
 	// via Artifact without prior Resolve (fetch path), then via Resolve cache.
 	for pass := 0; pass < 2; pass++ {
-		am, err := s.Artifact(context.Background(), "a1")
+		am, err := s.Artifact(context.Background(), source.Release{Tag: "a1"})
 		if err != nil || am.Type != "application/vnd.kuberik.x" || am.SourceURL != "https://github.com/o/r" || am.Title != "cfgtitle" || am.Description != "d" {
 			t.Fatalf("a1 %+v %v", am, err)
 		}
 		resolve(t, s, "a1")
 	}
-	if am, _ := s.Artifact(context.Background(), "a2"); am.Type != "application/vnd.oci.image.config.v1+json" {
+	if am, _ := s.Artifact(context.Background(), source.Release{Tag: "a2"}); am.Type != "application/vnd.oci.image.config.v1+json" {
 		t.Fatalf("a2 %+v", am)
 	}
-	if am, _ := s.Artifact(context.Background(), "a3"); am.Type != mtManifest {
+	if am, _ := s.Artifact(context.Background(), source.Release{Tag: "a3"}); am.Type != mtManifest {
 		t.Fatalf("a3 %+v", am)
 	}
 }

@@ -42,9 +42,14 @@ type Source struct {
 
 	mu       sync.Mutex
 	artifact map[string]*v1alpha1.ArtifactMetadata // tag -> metadata seen by Resolve
+	rejected map[string]string                     // tag -> bounds-violation message
 }
 
-var _ source.Source = (*Source)(nil)
+var (
+	_ source.Source           = (*Source)(nil)
+	_ source.AdmitAll         = (*Source)(nil)
+	_ source.ArtifactProvider = (*Source)(nil)
+)
 
 // New builds a Source from a resolved Config.
 func New(cfg Config) (*Source, error) {
@@ -70,7 +75,7 @@ func New(cfg Config) (*Source, error) {
 	if cfg.Keychain == nil {
 		cfg.Keychain = authn.DefaultKeychain
 	}
-	return &Source{cfg: cfg, ext: ext, exc: exc, pol: pol, artifact: map[string]*v1alpha1.ArtifactMetadata{}}, nil
+	return &Source{cfg: cfg, ext: ext, exc: exc, pol: pol, artifact: map[string]*v1alpha1.ArtifactMetadata{}, rejected: map[string]string{}}, nil
 }
 
 func (s *Source) opts() []crane.Option {
@@ -117,10 +122,9 @@ func (s *Source) Discover(ctx context.Context, _ string) (source.DiscoverResult,
 // Failure contract: a registry or parse failure yields a Release with
 // MetadataUnresolved=true and a nil error (the tag is kept, as today). A
 // fail-closed bounds violation (>32 requires keys, key >64 B, value >256 B)
-// yields the same Release (digest set if known) together with a non-nil
-// *MetadataRejectedError; the reconciler must keep the Release, mark it
-// unresolved, and emit a MetadataRejected Event with err.Error() (find it with
-// errors.As). It must not fail the sync.
+// yields the same (digest set if known) with a nil error as well, so the tag
+// is not retried every sync; the reason is recorded and available from
+// Rejection(tag) so the reconciler can emit a MetadataRejected Event.
 func (s *Source) Resolve(ctx context.Context, ref source.Ref) (source.Release, error) {
 	rel := source.Release{Tag: ref.Tag, MetadataUnresolved: true}
 	imageRef := s.cfg.Image + ":" + ref.Tag
@@ -145,7 +149,10 @@ func (s *Source) Resolve(ctx context.Context, ref source.Ref) (source.Release, e
 	if err != nil {
 		var be *boundsError
 		if errors.As(err, &be) {
-			return rel, &MetadataRejectedError{Tag: ref.Tag, Reason: be.msg}
+			s.mu.Lock()
+			s.rejected[ref.Tag] = (&MetadataRejectedError{Tag: ref.Tag, Reason: be.msg}).Error()
+			s.mu.Unlock()
+			return rel, nil
 		}
 		return rel, nil
 	}
@@ -179,11 +186,22 @@ func (s *Source) Resolve(ctx context.Context, ref source.Ref) (source.Release, e
 	return rel, nil
 }
 
-// Artifact returns the artifact-level metadata (artifactType, source, title,
-// description) of a release, for status.artifact of the newest one. It reuses
-// what Resolve already read in this Source instance and otherwise fetches the
-// manifest. A nil result with a nil error means the manifest has none.
-func (s *Source) Artifact(ctx context.Context, tag string) (*v1alpha1.ArtifactMetadata, error) {
+// Rejection returns the MetadataRejected message recorded by Resolve for tag
+// in this Source instance (bounds violation), if any.
+func (s *Source) Rejection(tag string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	msg, ok := s.rejected[tag]
+	return msg, ok
+}
+
+// Artifact implements source.ArtifactProvider: artifact-level metadata
+// (artifactType, source, title, description) of the newest release, for
+// status.artifact. It reuses what Resolve already read in this Source instance
+// and otherwise fetches the manifest. A nil result with a nil error means the
+// manifest has none.
+func (s *Source) Artifact(ctx context.Context, newest source.Release) (*v1alpha1.ArtifactMetadata, error) {
+	tag := newest.Tag
 	s.mu.Lock()
 	am, ok := s.artifact[tag]
 	s.mu.Unlock()
