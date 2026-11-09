@@ -137,7 +137,7 @@ var _ = Describe("ReleaseSource Controller (fake source)", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 			Spec: kuberikcomv1alpha1.ReleaseSourceSpec{
 				OCI:       &kuberikcomv1alpha1.OCISource{Image: "example.com/app"},
-				Interval:  metav1.Duration{Duration: time.Minute},
+				Interval:  &metav1.Duration{Duration: time.Minute},
 				Retention: kuberikcomv1alpha1.Retention{Days: ptr.To[int32](7), MinCount: ptr.To[int32](3)},
 			},
 		}

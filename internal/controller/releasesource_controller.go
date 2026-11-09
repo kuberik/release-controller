@@ -139,7 +139,10 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if !rs.DeletionTimestamp.IsZero() || rs.Spec.Suspend {
 		return ctrl.Result{}, nil
 	}
-	interval := rs.Spec.Interval.Duration
+	interval := defaultInterval
+	if rs.Spec.Interval != nil {
+		interval = rs.Spec.Interval.Duration
+	}
 	if interval <= 0 {
 		interval = defaultInterval
 	}
