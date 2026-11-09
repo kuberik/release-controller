@@ -97,8 +97,7 @@ type backoffEntry struct {
 
 type sourceMem struct {
 	backoff     map[string]backoffEntry
-	walkMin     string // catalogue minimum tag the walk position belongs to
-	walkPos     string
+	walk        cat.WalkMemory // backfill walk position; committed only after the slice write succeeded
 	lastSkipped int
 }
 
@@ -273,7 +272,7 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		r.event(&rs, "Normal", "IdentityChanged", fmt.Sprintf("source identity changed from %q to %q; catalogue rebuilt", old, id))
 		existing = nil
 		st.Cursor, st.Newest, st.Artifact, st.Count, st.SliceCount, st.OpenSlice, st.BackfillComplete = "", nil, nil, 0, 0, "", false
-		mem.backoff, mem.walkMin, mem.walkPos = map[string]backoffEntry{}, "", ""
+		mem.backoff, mem.walk = map[string]backoffEntry{}, cat.WalkMemory{}
 		break
 	}
 
@@ -396,10 +395,7 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if len(catalogue) > 0 {
 		minTag = catalogue[0].Tag
 	}
-	walkAfter := ""
-	if mem.walkMin == minTag {
-		walkAfter = mem.walkPos
-	}
+	walkAfter := mem.walk.After(minTag)
 	res := cat.Admit(cat.State{Catalogue: catalogue, BackfillComplete: st.BackfillComplete}, dres.Refs, cat.Config{
 		Less:      src.Less,
 		Resolve:   resolver,
@@ -409,6 +405,7 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		Now:       now,
 		WalkAfter: walkAfter,
 		Held:      func(tag string) bool { return mem.held(tag, now) },
+		Attempts:  func(tag string) int { return mem.backoff[tag].attempts },
 	})
 	for _, tag := range res.Transient {
 		mem.failed(tag, now)
@@ -418,13 +415,6 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	for _, rj := range res.Rejections {
 		r.event(&rs, "Warning", "MetadataRejected", fmt.Sprintf("%s: %s", rj.Tag, rj.Reason))
-	}
-	mem.walkMin, mem.walkPos = minTag, res.WalkPos
-	if res.WalkPos == "" {
-		mem.walkPos = walkAfter
-	}
-	if res.BackfillComplete {
-		mem.walkMin, mem.walkPos = "", "" // a later rebuild (all slices deleted) walks from the top again
 	}
 	leftover := res.Leftover + repairLeft
 
@@ -446,14 +436,23 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		delete(mem.backoff, tag)
 		r.event(&rs, "Warning", "MetadataRejected", fmt.Sprintf("%s: resolved metadata would grow its slice over the size limit", tag))
 	}
+	if err := slicer.CheckSequences(plan.Final); err != nil {
+		return ctrl.Result{}, fmt.Errorf("refusing to write the plan: %w", err)
+	}
 	if conflict, err := r.apply(ctx, rs.Namespace, plan); err != nil {
 		return ctrl.Result{}, err
 	} else if conflict {
 		return ctrl.Result{RequeueAfter: syncingRequeue}, nil
 	}
 
-	// 5. Status from the post-plan state.
+	// 5. Status from the post-plan state. The walk memory advances only now:
+	// the batch it skips past is stored.
 	final := slicer.Merge(plan.Final)
+	newMin := ""
+	if len(final) > 0 {
+		newMin = final[0].Tag
+	}
+	mem.walk = mem.walk.Next(walkAfter, res, newMin)
 	st.Count = int32(len(final))
 	releasesGauge.WithLabelValues(sourceKind(&rs), rs.Namespace, rs.Name).Set(float64(len(final)))
 	slicesGauge.WithLabelValues(sourceKind(&rs), rs.Namespace, rs.Name).Set(float64(len(plan.Final)))
@@ -544,9 +543,16 @@ func retention(rs *kuberikcomv1alpha1.ReleaseSource) (days int32, minCount int32
 	return
 }
 
+// listSlices reads the source's slices through the uncached API reader (a
+// handful of objects): admission numbers sequences from the truth, not from an
+// informer that may not have seen the previous write yet.
 func (r *ReleaseSourceReconciler) listSlices(ctx context.Context, rs *kuberikcomv1alpha1.ReleaseSource) ([]kuberikcomv1alpha1.ReleaseSlice, error) {
+	var reader client.Reader = r.Client
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
 	var list kuberikcomv1alpha1.ReleaseSliceList
-	if err := r.List(ctx, &list, client.InNamespace(rs.Namespace), client.MatchingLabels{kuberikcomv1alpha1.ReleaseSourceLabel: rs.Name}); err != nil {
+	if err := reader.List(ctx, &list, client.InNamespace(rs.Namespace), client.MatchingLabels{kuberikcomv1alpha1.ReleaseSourceLabel: rs.Name}); err != nil {
 		return nil, err
 	}
 	var out []kuberikcomv1alpha1.ReleaseSlice
@@ -653,9 +659,16 @@ func (r *ReleaseSourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		conc = 1
 	}
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&kuberikcomv1alpha1.ReleaseSource{}).
+		For(&kuberikcomv1alpha1.ReleaseSource{}, builder.WithPredicates(sourceChangedPredicate())).
 		Owns(&kuberikcomv1alpha1.ReleaseSlice{}, builder.WithPredicates(deleteOnly)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: conc}).
 		Named("releasesource").
 		Complete(r)
+}
+
+// sourceChangedPredicate lets spec (generation) and annotation changes of a
+// ReleaseSource through but not status-only updates: the reconciler writes its
+// own status, and a registry listing per status write would loop.
+func sourceChangedPredicate() predicate.Predicate {
+	return predicate.Or(predicate.GenerationChangedPredicate{}, predicate.AnnotationChangedPredicate{})
 }

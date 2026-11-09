@@ -416,3 +416,18 @@ func Compute(in Input, cfg Config) Plan {
 	}
 	return plan
 }
+
+// CheckSequences reports an error if two different tags in the catalogue
+// share a sequence. A plan that would write such a catalogue is refused: the
+// reader's order would depend on the tag tie-break, and a sealed slice cannot
+// be renumbered afterwards.
+func CheckSequences(final []v1alpha1.ReleaseSlice) error {
+	bySeq := map[int64]string{}
+	for _, r := range Merge(final) {
+		if other, ok := bySeq[r.Sequence]; ok && other != r.Tag {
+			return fmt.Errorf("sequence %d is held by both %q and %q", r.Sequence, other, r.Tag)
+		}
+		bySeq[r.Sequence] = r.Tag
+	}
+	return nil
+}

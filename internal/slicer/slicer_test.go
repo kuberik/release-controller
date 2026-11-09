@@ -347,3 +347,24 @@ func TestRetentionKeepsTheSliceHoldingTheNewest(t *testing.T) {
 		t.Fatalf("deletes %v", p.Deletes)
 	}
 }
+
+func TestCheckSequencesRefusesCollidingTags(t *testing.T) {
+	ok := []v1alpha1.ReleaseSlice{{Releases: []v1alpha1.Release{rel("a", 1), rel("b", 2)}}}
+	if err := CheckSequences(ok); err != nil {
+		t.Fatal(err)
+	}
+	bad := []v1alpha1.ReleaseSlice{
+		{ObjectMeta: metav1.ObjectMeta{Name: "s-00000"}, Releases: []v1alpha1.Release{rel("a", 1), rel("b", 2)}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "s-00001"}, Releases: []v1alpha1.Release{rel("c", 2)}},
+	}
+	if err := CheckSequences(bad); err == nil {
+		t.Fatal("two tags with sequence 2 must be refused")
+	}
+	same := []v1alpha1.ReleaseSlice{
+		{ObjectMeta: metav1.ObjectMeta{Name: "s-00000"}, Releases: []v1alpha1.Release{rel("a", 1)}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "s-00001"}, Releases: []v1alpha1.Release{rel("a", 1)}},
+	}
+	if err := CheckSequences(same); err != nil {
+		t.Fatalf("the same tag twice is a harmless duplicate: %v", err)
+	}
+}
