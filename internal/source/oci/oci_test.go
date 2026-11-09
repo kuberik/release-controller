@@ -530,3 +530,50 @@ func TestRegisteredAndNoSpec(t *testing.T) {
 		t.Fatal("no spec.oci must error")
 	}
 }
+
+func TestResolveCRDBounds(t *testing.T) {
+	r := newReg(t, nil)
+	s := newSrc(t, r, "app", nil, nil)
+	long := strings.Repeat("x", 129)
+	r.put("app", "longver", mtManifest, image(map[string]string{"org.opencontainers.image.version": long}, nil, nil))
+	r.put("app", "longrev", mtManifest, image(map[string]string{"org.opencontainers.image.revision": long}, nil, nil))
+	r.put("app", "okver", mtManifest, image(map[string]string{"org.opencontainers.image.version": strings.Repeat("x", 128)}, nil, nil))
+	for _, tag := range []string{"longver", "longrev"} {
+		rel := resolve(t, s, tag)
+		if !rel.MetadataUnresolved || rel.Version != nil || rel.Revision != nil || rel.Digest == nil {
+			t.Fatalf("%s: %+v", tag, rel)
+		}
+		if msg, ok := s.Rejection(tag); !ok || !strings.Contains(msg, "exceeds") {
+			t.Fatalf("%s: rejection %q", tag, msg)
+		}
+	}
+	if rel := resolve(t, s, "okver"); rel.MetadataUnresolved || rel.Version == nil {
+		t.Fatalf("version at the bound must resolve: %+v", rel)
+	}
+}
+
+func TestDiscoverSkipsOverlongTags(t *testing.T) {
+	r := newReg(t, nil)
+	s := newSrc(t, r, "app", nil, nil)
+	r.put("app", "v1", mtManifest, image(nil, nil, nil))
+	r.put("app", strings.Repeat("t", 128), mtManifest, image(nil, nil, nil))
+	r.put("app", strings.Repeat("t", 129), mtManifest, image(nil, nil, nil))
+	res, err := s.Discover(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := tagsOf(res); len(got) != 2 {
+		t.Fatalf("tags: %v", got)
+	}
+	if n := s.SkippedLongTags(); n != 1 {
+		t.Fatalf("skipped = %d", n)
+	}
+}
+
+func TestClipArtifact(t *testing.T) {
+	am := &v1alpha1.ArtifactMetadata{Type: "t", Title: strings.Repeat("x", 257), Description: strings.Repeat("d", 2048), SourceURL: strings.Repeat("u", 513)}
+	clipArtifact(am)
+	if am.Title != "" || am.SourceURL != "" || am.Type != "t" || len(am.Description) != 2048 {
+		t.Fatalf("%+v", am)
+	}
+}
