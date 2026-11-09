@@ -73,14 +73,25 @@ type Config struct {
 	Days     int32
 	MinCount int
 	Now      time.Time
-	// WalkAfter resumes the backfill walk after this tag. It only saves
-	// re-resolving tags the created rule already excluded; it is a hint, a
-	// wrong or stale value costs requests, never correctness.
+	// WalkAfter resumes the backfill walk after this tag. The walk position
+	// only ever passes tags that were admitted or definitively excluded (the
+	// created rule, a permanent rejection), so every tag at or before it is
+	// settled; a hint that is lost costs re-resolves of excluded tags, never
+	// correctness. The hint is only valid while the catalogue minimum it was
+	// recorded against is unchanged (see WalkMemory).
 	WalkAfter string
 	// Held reports a tag whose retry is backed off. A held tag stops the
 	// backfill walk (order matters), it is not skipped.
 	Held func(tag string) bool
+	// Attempts reports how many resolves of a tag already failed transiently.
+	// A walk tag whose failure would be its MaxAttempts-th is admitted
+	// unresolved (repaired later) so the walk can finish. Nil means never.
+	Attempts func(tag string) int
 }
+
+// MaxAttempts is the number of transient resolve failures after which a
+// backfill tag is admitted unresolved instead of holding the walk.
+const MaxAttempts = 5
 
 // Rejection is a permanent rejection recorded in this Admit.
 type Rejection struct{ Tag, Reason string }
@@ -97,7 +108,8 @@ type Result struct {
 	Leftover int
 	// BackfillComplete is the new value of status.backfillComplete.
 	BackfillComplete bool
-	// WalkPos is the last tag the backfill walk processed (for WalkAfter).
+	// WalkPos is the last tag the backfill walk settled (admitted or excluded);
+	// a transiently failing tag is not settled. Empty if none was.
 	WalkPos string
 	// Rejections are the permanent rejections among Admitted.
 	Rejections []Rejection
@@ -294,14 +306,19 @@ func Admit(st State, refs []source.Ref, cfg Config) Result {
 			break
 		}
 		rel, rj := resolve(ref)
-		res.WalkPos = ref.Tag
 		if rel.MetadataUnresolved && rj == "" {
 			// Transient failure: without created the rule cannot be applied,
-			// and skipping would lose the tag's place. Stop and retry later.
-			res.Retry = append(res.Retry, ref.Tag)
-			res.Waiting, done = true, false
-			break
+			// and skipping would lose the tag's place. Hold the walk here (the
+			// position stays before this tag) and retry later, unless it has
+			// failed MaxAttempts times: then it is stored unresolved (repaired
+			// later) so the walk can finish.
+			if cfg.Attempts == nil || cfg.Attempts(ref.Tag)+1 < MaxAttempts {
+				res.Retry = append(res.Retry, ref.Tag)
+				res.Waiting, done = true, false
+				break
+			}
 		}
+		res.WalkPos = ref.Tag
 		real := hasCreated(rel)
 		if real && runMin != nil && sec(rel.Created.Time).After(*runMin) {
 			continue // created later than a tag above it: a backport or retag
@@ -320,4 +337,31 @@ func Admit(st State, refs []source.Ref, cfg Config) Result {
 	}
 	res.BackfillComplete = done
 	return res
+}
+
+// WalkMemory is the reconciler's per-source hint for Config.WalkAfter. It is
+// recorded against the catalogue minimum the position belongs to, and must be
+// committed only after the slices holding the batch are written: a position
+// that outruns the stored catalogue skips tags for good.
+type WalkMemory struct{ Min, Pos string }
+
+// After is the WalkAfter hint for a catalogue whose minimum tag is min.
+func (w WalkMemory) After(min string) string {
+	if w.Min == min {
+		return w.Pos
+	}
+	return ""
+}
+
+// Next is the memory after a sync whose Admit used hint and whose written
+// catalogue has the minimum newMin.
+func (w WalkMemory) Next(hint string, res Result, newMin string) WalkMemory {
+	if res.BackfillComplete {
+		return WalkMemory{} // a later rebuild (all slices deleted) walks from the top again
+	}
+	pos := res.WalkPos
+	if pos == "" {
+		pos = hint
+	}
+	return WalkMemory{Min: newMin, Pos: pos}
 }

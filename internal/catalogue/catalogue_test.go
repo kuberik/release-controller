@@ -315,3 +315,63 @@ func TestSequencesStrictlyFollowPolicyAfterMixedSyncs(t *testing.T) {
 		t.Fatalf("newest %s complete %v", cat[len(cat)-1].Tag, st.BackfillComplete)
 	}
 }
+
+// B1: the walk position never passes a tag that is neither admitted nor
+// definitively excluded. A transient failure on the first tag below the
+// minimum must leave WalkPos where it was.
+func TestWalkPosDoesNotAdvancePastTransientTag(t *testing.T) {
+	r := newReg(40)
+	now := day0.Add(60 * 24 * time.Hour)
+	st := apply(State{}, Admit(State{}, r.refs(), r.cfg(now, 0, 3, 10))) // t031..t040
+	r.transient[tag(30)] = true
+	cfg := r.cfg(now, 0, 3, 10)
+	res := Admit(st, r.refs(), cfg)
+	if res.WalkPos != "" {
+		t.Fatalf("WalkPos %q advanced onto the transiently failing tag", res.WalkPos)
+	}
+	if !res.Waiting || fmt.Sprint(res.Retry) != "[t030]" {
+		t.Fatalf("waiting %v retry %v", res.Waiting, res.Retry)
+	}
+	// Resuming with the hint the caller would hold must still reach t030.
+	r.transient[tag(30)] = false
+	cfg.WalkAfter = res.WalkPos
+	res = Admit(st, r.refs(), cfg)
+	st = apply(st, res)
+	for i := 30; i >= 21; i-- {
+		found := false
+		for _, c := range st.Catalogue {
+			found = found || c.Tag == tag(i)
+		}
+		if !found {
+			t.Fatalf("%s lost after one transient failure", tag(i))
+		}
+	}
+}
+
+// B1 cap: after MaxAttempts failures the tag is admitted unresolved so the
+// walk can finish; it is repaired later.
+func TestWalkAdmitsStubAfterMaxAttempts(t *testing.T) {
+	r := newReg(10)
+	r.transient[tag(8)] = true
+	now := day0.Add(12 * 24 * time.Hour)
+	attempts := 0
+	cfg := r.cfg(now, 0, 3, 100)
+	cfg.Attempts = func(string) int { return attempts }
+	res := Admit(State{}, r.refs(), cfg)
+	if !res.Waiting || len(res.Admitted) != 2 {
+		t.Fatalf("first failure must hold the walk: waiting %v admitted %d", res.Waiting, len(res.Admitted))
+	}
+	attempts = MaxAttempts - 1 // this resolve is the MaxAttempts-th failure
+	res = Admit(State{}, r.refs(), cfg)
+	if res.Waiting || !res.BackfillComplete || len(res.Admitted) != 10 {
+		t.Fatalf("waiting %v complete %v admitted %d", res.Waiting, res.BackfillComplete, len(res.Admitted))
+	}
+	if fmt.Sprint(res.Transient) != "[t008]" {
+		t.Fatalf("transient %v", res.Transient)
+	}
+	for _, a := range res.Admitted {
+		if a.Tag == tag(8) && !a.MetadataUnresolved {
+			t.Fatal("capped tag must be stored unresolved")
+		}
+	}
+}
