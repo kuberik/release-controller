@@ -134,22 +134,29 @@ func TestDiscoverFilterAndExtract(t *testing.T) {
 }
 
 func TestDiscoverPaginates(t *testing.T) {
-	r := newReg(t, nil)
+	// The in-memory registry does not emit Link headers, so serve the tag list
+	// ourselves in pages of 10 with RFC 5988 Link: rel="next".
+	var all []string
 	for i := 0; i < 25; i++ {
-		r.put("app", fmt.Sprintf("t%02d", i), mtManifest, image(nil, nil, nil))
+		all = append(all, fmt.Sprintf("t%02d", i))
 	}
-	// Force pagination through the registry's n= parameter.
 	pages := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if strings.HasSuffix(req.URL.Path, "/tags/list") {
-			pages++
+		if req.URL.Path == "/v2/" {
+			return
 		}
-		if strings.HasSuffix(req.URL.Path, "/tags/list") {
-			q := req.URL.Query()
-			q.Set("n", "10")
-			req.URL.RawQuery = q.Encode()
+		pages++
+		last := req.URL.Query().Get("last")
+		var page []string
+		for _, tg := range all {
+			if tg > last && len(page) < 10 {
+				page = append(page, tg)
+			}
 		}
-		proxy(w, req, r.srv.URL)
+		if len(page) == 10 && page[9] != all[len(all)-1] {
+			w.Header().Set("Link", fmt.Sprintf(`</v2/app/tags/list?last=%s&n=10>; rel="next"`, page[9]))
+		}
+		json.NewEncoder(w).Encode(m{"name": "app", "tags": page})
 	}))
 	defer srv.Close()
 	s, _ := New(Config{Image: strings.TrimPrefix(srv.URL, "http://") + "/app", Insecure: true})
@@ -157,32 +164,12 @@ func TestDiscoverPaginates(t *testing.T) {
 	if err != nil || len(res.Refs) != 25 {
 		t.Fatalf("err=%v n=%d", err, len(res.Refs))
 	}
-	if pages < 3 {
-		t.Fatalf("expected >=3 tag-list pages, got %d", pages)
+	if pages != 3 {
+		t.Fatalf("expected 3 tag-list pages, got %d", pages)
 	}
 	if !s.AdmitAll() {
 		t.Fatal("no policy => AdmitAll")
 	}
-}
-
-// proxy forwards to the backing registry, rewriting Link headers to this host.
-func proxy(w http.ResponseWriter, req *http.Request, backend string) {
-	out, _ := http.NewRequest(req.Method, backend+req.URL.RequestURI(), req.Body)
-	resp, err := http.DefaultClient.Do(out)
-	if err != nil {
-		http.Error(w, err.Error(), 502)
-		return
-	}
-	defer resp.Body.Close()
-	for k, v := range resp.Header {
-		for _, x := range v {
-			w.Header().Add(k, x)
-		}
-	}
-	w.WriteHeader(resp.StatusCode)
-	var buf bytes.Buffer
-	buf.ReadFrom(resp.Body)
-	w.Write(buf.Bytes())
 }
 
 func TestSemverRangeFilters(t *testing.T) {
