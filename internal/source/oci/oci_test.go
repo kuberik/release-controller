@@ -144,7 +144,7 @@ func TestDiscoverPaginates(t *testing.T) {
 		if strings.HasSuffix(req.URL.Path, "/tags/list") {
 			pages++
 		}
-		if strings.HasSuffix(req.URL.Path, "/tags/list") && req.URL.Query().Get("n") == "" {
+		if strings.HasSuffix(req.URL.Path, "/tags/list") {
 			q := req.URL.Query()
 			q.Set("n", "10")
 			req.URL.RawQuery = q.Encode()
