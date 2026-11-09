@@ -5,6 +5,9 @@ package oci
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -51,6 +54,7 @@ type Source struct {
 var (
 	_ source.Source           = (*Source)(nil)
 	_ source.Identifier       = (*Source)(nil)
+	_ source.Fingerprinter    = (*Source)(nil)
 	_ source.ArtifactProvider = (*Source)(nil)
 	_ source.Rejecter         = (*Source)(nil)
 	_ source.TagSkipper       = (*Source)(nil)
@@ -96,6 +100,17 @@ func (s *Source) opts() []crane.Option {
 
 // Identity is the repository the catalogue is built from.
 func (s *Source) Identity() string { return s.cfg.Image }
+
+// Fingerprint hashes the effective policy, filterTags and exclusion list.
+func (s *Source) Fingerprint() string {
+	b, _ := json.Marshal(struct {
+		Policy  *v1alpha1.OrderPolicy
+		Filter  *v1alpha1.TagFilter
+		Exclude []string
+	}{s.cfg.Policy, s.cfg.FilterTags, s.cfg.Exclude})
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:6])
+}
 
 // Discover lists all tags (crane.ListTags follows registry pagination), keeps
 // those passing filterTags.pattern and, for semver/numerical, those orderable

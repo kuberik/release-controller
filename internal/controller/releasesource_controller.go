@@ -99,6 +99,9 @@ type sourceMem struct {
 	backoff     map[string]backoffEntry
 	walk        cat.WalkMemory // backfill walk position; committed only after the slice write succeeded
 	lastSkipped int
+	// blockedID is the identity whose change was reported as blocked, so the
+	// Warning fires on the transition, not on every retry.
+	blockedID string
 }
 
 const (
@@ -174,14 +177,21 @@ func identity(rs *kuberikcomv1alpha1.ReleaseSource, src source.Source) string {
 	if o == nil {
 		return ""
 	}
+	var id string
 	if o.ImagePolicyRef != nil {
-		id := "imagePolicyRef:" + o.ImagePolicyRef.Name
+		id = "imagePolicyRef:" + o.ImagePolicyRef.Name
 		if i, ok := src.(source.Identifier); ok && i.Identity() != "" {
 			id += "@" + i.Identity()
 		}
-		return id
+	} else {
+		id = "image:" + o.Image
 	}
-	return "image:" + o.Image
+	// The effective policy, filterTags and exclusion list decide the order the
+	// stored sequences encode: a change is a new catalogue.
+	if f, ok := src.(source.Fingerprinter); ok && f.Fingerprint() != "" {
+		id += "#" + f.Fingerprint()
+	}
+	return id
 }
 
 func jitter(d time.Duration) time.Duration {
@@ -260,7 +270,10 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 		dres, derr := src.Discover(ctx, "")
 		if derr != nil {
-			r.event(&rs, "Warning", "IdentityChangeBlocked", fmt.Sprintf("source identity changed from %q to %q but the new source cannot be listed, keeping the old catalogue: %v", old, id, derr))
+			if mem.blockedID != id {
+				mem.blockedID = id
+				r.event(&rs, "Warning", "IdentityChangeBlocked", fmt.Sprintf("source identity changed from %q to %q but the new source cannot be listed, keeping the old catalogue: %v", old, id, derr))
+			}
 			return r.unreachable(ctx, &rs, st, now, interval, true, derr)
 		}
 		pre = &dres
@@ -276,6 +289,7 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		break
 	}
 
+	mem.blockedID = ""
 	catalogue := slicer.Merge(existing)
 	repairable := 0
 	for _, c := range catalogue {

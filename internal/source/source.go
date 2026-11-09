@@ -57,6 +57,14 @@ type Identifier interface {
 	Identity() string
 }
 
+// Fingerprinter is an optional interface. Fingerprint is a stable hash of the
+// source's effective ordering and filtering configuration (policy, filterTags,
+// exclusion list, after references are followed). It joins the identity, so a
+// change rebuilds the catalogue: the stored sequences encode the old policy.
+type Fingerprinter interface {
+	Fingerprint() string
+}
+
 // Rejecter is an optional interface. After Resolve, a source that recorded a
 // fail-closed rejection (e.g. metadata over the CRD bounds) returns its message
 // and true; the reconciler emits a Warning Event MetadataRejected.

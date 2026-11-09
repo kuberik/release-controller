@@ -575,3 +575,28 @@ func TestClipArtifact(t *testing.T) {
 		t.Fatalf("%+v", am)
 	}
 }
+
+func TestFingerprintCoversPolicyFilterAndExclusions(t *testing.T) {
+	alpha := &v1alpha1.OrderPolicy{Alphabetical: &v1alpha1.AlphabeticalPolicy{}}
+	fp := func(c Config) string {
+		c.Image = "x/y"
+		s, err := New(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s.Fingerprint()
+	}
+	base := fp(Config{Policy: alpha})
+	if base != fp(Config{Policy: alpha}) {
+		t.Fatal("fingerprint must be stable")
+	}
+	for name, c := range map[string]Config{
+		"policy":  {Policy: &v1alpha1.OrderPolicy{Alphabetical: &v1alpha1.AlphabeticalPolicy{Order: "desc"}}},
+		"filter":  {Policy: alpha, FilterTags: &v1alpha1.TagFilter{Pattern: "^main-"}},
+		"exclude": {Policy: alpha, Exclude: []string{"-rc"}},
+	} {
+		if fp(c) == base {
+			t.Fatalf("a changed %s must change the fingerprint", name)
+		}
+	}
+}

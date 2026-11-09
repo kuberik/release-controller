@@ -56,6 +56,7 @@ type fakeSource struct {
 	resolves    int
 	rejects     map[string]string // tag -> permanent rejection reason
 	ident       string
+	fp          string
 	skippedLong int
 }
 
@@ -123,6 +124,7 @@ func (f *fakeSource) Resolve(_ context.Context, ref source.Ref) (source.Release,
 
 func (f *fakeSource) Less(a, b source.Release) bool { return a.Tag < b.Tag }
 func (f *fakeSource) Identity() string              { return f.ident }
+func (f *fakeSource) Fingerprint() string           { return f.fp }
 func (f *fakeSource) SkippedLongTags() int          { return f.skippedLong }
 func (f *fakeSource) Rejection(tag string) (string, bool) {
 	f.mu.Lock()
@@ -708,6 +710,42 @@ var _ = Describe("ReleaseSource Controller (fake source)", func() {
 			}
 		}
 		Expect(n).To(Equal(2))
+	})
+
+	It("minor 2: a changed effective policy/filter fingerprint rebuilds the catalogue", func() {
+		create(nil)
+		fake.fp = "aaaa"
+		fake.addN(0, 12)
+		sync()
+		old := slices()
+		Expect(old[0].Annotations[IdentityAnnotation]).To(HaveSuffix("#aaaa"))
+		sync() // unchanged fingerprint: nothing is rebuilt
+		Expect(slices()[0].Name).To(Equal(old[0].Name))
+		fake.fp = "bbbb" // policy / filterTags / exclusionList changed
+		sync()
+		now := slices()
+		Expect(now).NotTo(BeEmpty())
+		Expect(now[0].Name).NotTo(Equal(old[0].Name))
+		Expect(now[0].Annotations[IdentityAnnotation]).To(HaveSuffix("#bbbb"))
+		Expect(rec.Events).To(Receive(ContainSubstring("IdentityChanged")))
+	})
+
+	It("minor 5: IdentityChangeBlocked fires once per blocked change, not every sync", func() {
+		create(nil)
+		fake.addN(0, 6)
+		sync()
+		fake.fp = "other"
+		fake.err = errors.New("registry down")
+		for i := 0; i < 4; i++ {
+			sync()
+		}
+		blocked := 0
+		for len(rec.Events) > 0 {
+			if strings.Contains(<-rec.Events, "IdentityChangeBlocked") {
+				blocked++
+			}
+		}
+		Expect(blocked).To(Equal(1))
 	})
 
 	It("an identity change keeps the old catalogue when the new source cannot be listed, and includes the resolved image", func() {
