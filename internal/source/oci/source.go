@@ -8,12 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"sync"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/name"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/kuberik/release-controller/api/v1alpha1"
 	"github.com/kuberik/release-controller/internal/source"
@@ -40,15 +42,18 @@ type Source struct {
 	exc []*regexp.Regexp
 	pol *policy
 
-	mu       sync.Mutex
-	artifact map[string]*v1alpha1.ArtifactMetadata // tag -> metadata seen by Resolve
-	rejected map[string]string                     // tag -> bounds-violation message
+	mu          sync.Mutex
+	artifact    map[string]*v1alpha1.ArtifactMetadata // tag -> metadata seen by Resolve
+	rejected    map[string]string                     // tag -> bounds-violation message
+	skippedLong int                                   // tags skipped by the last Discover for exceeding maxTagLength
 }
 
 var (
 	_ source.Source           = (*Source)(nil)
 	_ source.AdmitAll         = (*Source)(nil)
 	_ source.ArtifactProvider = (*Source)(nil)
+	_ source.Rejecter         = (*Source)(nil)
+	_ source.TagSkipper       = (*Source)(nil)
 )
 
 // New builds a Source from a resolved Config.
@@ -100,7 +105,12 @@ func (s *Source) Discover(ctx context.Context, _ string) (source.DiscoverResult,
 		return source.DiscoverResult{}, fmt.Errorf("listing tags of %s: %w", s.cfg.Image, err)
 	}
 	refs := make([]source.Ref, 0, len(tags))
+	tooLong := 0
 	for _, tag := range tags {
+		if len(tag) > maxTagLength {
+			tooLong++
+			continue
+		}
 		if s.excluded(tag) {
 			continue
 		}
@@ -109,6 +119,12 @@ func (s *Source) Discover(ctx context.Context, _ string) (source.DiscoverResult,
 			continue
 		}
 		refs = append(refs, source.Ref{Tag: tag})
+	}
+	if tooLong > 0 {
+		s.mu.Lock()
+		s.skippedLong = tooLong
+		s.mu.Unlock()
+		ctrl.LoggerFrom(ctx).Info("skipped tags longer than the CRD bound", "image", s.cfg.Image, "count", tooLong, "max", maxTagLength)
 	}
 	return source.DiscoverResult{Refs: refs}, nil
 }
@@ -161,6 +177,30 @@ func (s *Source) Resolve(ctx context.Context, ref source.Ref) (source.Release, e
 	rel.Version = md.Version
 	rel.Revision = md.Revision
 	rel.Requires = md.Requires
+	// Bounds of the ReleaseSlice CRD: an over-long field would fail the whole
+	// slice write, so treat it as a violation like requires (fail closed).
+	var violations []string
+	if len(digest) > maxDigestLength {
+		rel.Digest = nil
+		violations = append(violations, fmt.Sprintf("digest exceeds %d bytes", maxDigestLength))
+	}
+	if rel.Version != nil && len(*rel.Version) > maxVersionLength {
+		rel.Version = nil
+		violations = append(violations, fmt.Sprintf("version exceeds %d bytes", maxVersionLength))
+	}
+	if rel.Revision != nil && len(*rel.Revision) > maxRevisionLength {
+		rel.Revision = nil
+		violations = append(violations, fmt.Sprintf("revision exceeds %d bytes", maxRevisionLength))
+	}
+	if len(violations) > 0 {
+		rel.MetadataUnresolved = true
+		rel.Requires = nil
+		rel.Created = metav1.Time{}
+		s.mu.Lock()
+		s.rejected[ref.Tag] = (&MetadataRejectedError{Tag: ref.Tag, Reason: strings.Join(violations, "; ")}).Error()
+		s.mu.Unlock()
+		return rel, nil
+	}
 	if md.Created != nil {
 		rel.Created = *md.Created
 	} else {
@@ -180,10 +220,19 @@ func (s *Source) Resolve(ctx context.Context, ref source.Ref) (source.Release, e
 	if md.Description != nil {
 		am.Description = *md.Description
 	}
+	clipArtifact(am)
 	s.mu.Lock()
 	s.artifact[ref.Tag] = am
 	s.mu.Unlock()
 	return rel, nil
+}
+
+// SkippedLongTags is the number of tags the last Discover skipped because they
+// exceed the CRD tag bound.
+func (s *Source) SkippedLongTags() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.skippedLong
 }
 
 // Rejection returns the MetadataRejected message recorded by Resolve for tag
@@ -234,7 +283,33 @@ func (s *Source) Artifact(ctx context.Context, newest source.Release) (*v1alpha1
 	if md.Description != nil {
 		am.Description = *md.Description
 	}
+	clipArtifact(am)
 	return am, nil
+}
+
+// CRD bounds on the status/slice fields the source fills.
+const (
+	maxTagLength      = 128
+	maxVersionLength  = 128
+	maxRevisionLength = 128
+	maxDigestLength   = 140
+)
+
+// clipArtifact drops artifact fields over their status.artifact CRD bounds
+// (they are descriptive only; an over-long one must not fail the status write).
+func clipArtifact(am *v1alpha1.ArtifactMetadata) {
+	if len(am.Type) > 256 {
+		am.Type = ""
+	}
+	if len(am.SourceURL) > 512 {
+		am.SourceURL = ""
+	}
+	if len(am.Title) > 256 {
+		am.Title = ""
+	}
+	if len(am.Description) > 2048 {
+		am.Description = ""
+	}
 }
 
 // Less orders releases under the policy, applied to the extracted tag value

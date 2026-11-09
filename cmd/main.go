@@ -199,8 +199,9 @@ func main() {
 	}
 
 	if err := (&controller.ReleaseSourceReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    mgr.GetScheme(),
 
 		MaxReleasesPerSlice:     maxReleasesPerSlice,
 		MaxSliceBytes:           maxSliceBytes,

@@ -72,6 +72,10 @@ type ReleaseSourceReconciler struct {
 	// SourceFactory builds the Source for a ReleaseSource. Nil means
 	// source.Lookup("oci"). Tests inject a fake.
 	SourceFactory source.Factory
+	// APIReader is an uncached reader handed to the source factory, so the
+	// manager starts no informers for ImagePolicy/ImageRepository/Secret.
+	// Nil falls back to Client (tests).
+	APIReader client.Reader
 	// Recorder emits Events; defaulted in SetupWithManager, nil-safe.
 	Recorder record.EventRecorder
 	// Now is the clock; nil means time.Now.
@@ -132,13 +136,16 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	var rs kuberikcomv1alpha1.ReleaseSource
 	if err := r.Get(ctx, req.NamespacedName, &rs); err != nil {
 		if apierrors.IsNotFound(err) {
+			forgetMetrics(req.Namespace, req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
 	if !rs.DeletionTimestamp.IsZero() || rs.Spec.Suspend {
+		forgetMetrics(rs.Namespace, rs.Name)
 		return ctrl.Result{}, nil
 	}
+	defer observeSync(&rs, time.Now())
 	interval := defaultInterval
 	if rs.Spec.Interval != nil {
 		interval = rs.Spec.Interval.Duration
@@ -179,7 +186,11 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			return r.fail(ctx, &rs, st, now, interval, kuberikcomv1alpha1.ReadyCondition, "ConfigInvalid", ferr.Error())
 		}
 	}
-	src, err := factory(ctx, r.Client, &rs)
+	var reader client.Reader = r.Client
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+	src, err := factory(ctx, reader, &rs)
 	if err != nil {
 		r.event(&rs, "Warning", "ConfigInvalid", err.Error())
 		return r.fail(ctx, &rs, st, now, interval, kuberikcomv1alpha1.ReadyCondition, "ConfigInvalid", err.Error())
@@ -206,6 +217,11 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if derr != nil {
 		log.Info("discover failed", "error", derr.Error())
 		return r.unreachable(ctx, &rs, st, now, interval, len(existing) > 0, derr)
+	}
+	if ts, ok := src.(source.TagSkipper); ok {
+		if n := ts.SkippedLongTags(); n > 0 {
+			r.event(&rs, "Warning", "TagsSkipped", fmt.Sprintf("%d tags skipped: longer than 128 characters", n))
+		}
 	}
 	meta.SetStatusCondition(&st.Conditions, metav1.Condition{LastTransitionTime: metav1.NewTime(r.now()), Type: kuberikcomv1alpha1.SourceReachableCondition, Status: metav1.ConditionTrue, Reason: "Reachable", Message: "source listed", ObservedGeneration: rs.Generation})
 
@@ -276,10 +292,18 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	var candidates, repairs []kuberikcomv1alpha1.Release
 	for i, ref := range resolveSet {
 		rel, rerr := src.Resolve(ctx, ref)
+		if rerr != nil || rel.MetadataUnresolved {
+			resolveErrors.WithLabelValues(sourceKind(&rs), rs.Namespace, rs.Name).Inc()
+		}
 		if rerr != nil {
 			log.Info("resolve failed", "tag", ref.Tag, "error", rerr.Error())
 			r.event(&rs, "Warning", "MetadataRejected", fmt.Sprintf("%s: %v", ref.Tag, rerr))
 			continue
+		}
+		if rej, ok := src.(source.Rejecter); ok {
+			if msg, rejected := rej.Rejection(ref.Tag); rejected {
+				r.event(&rs, "Warning", "MetadataRejected", msg)
+			}
 		}
 		if rel.Tag == "" {
 			rel.Tag = ref.Tag
@@ -348,6 +372,8 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// 8. Status from the post-plan state.
 	final := slicer.Merge(plan.Final)
 	st.Count = int32(len(final))
+	releasesGauge.WithLabelValues(sourceKind(&rs), rs.Namespace, rs.Name).Set(float64(len(final)))
+	slicesGauge.WithLabelValues(sourceKind(&rs), rs.Namespace, rs.Name).Set(float64(len(plan.Final)))
 	st.Slices = nil
 	for _, s := range plan.Final {
 		st.Slices = append(st.Slices, s.Name)

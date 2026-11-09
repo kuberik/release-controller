@@ -55,6 +55,20 @@ type AdmitAll interface {
 	AdmitAll() bool
 }
 
+// Rejecter is an optional interface. After Resolve, a source that recorded a
+// fail-closed rejection (e.g. metadata over the CRD bounds) returns its message
+// and true; the reconciler emits a Warning Event MetadataRejected.
+type Rejecter interface {
+	Rejection(tag string) (string, bool)
+}
+
+// TagSkipper is an optional interface. After Discover, SkippedLongTags is the
+// number of tags the source dropped because they cannot be stored (longer than
+// the ReleaseSlice tag bound); the reconciler emits a Warning Event TagsSkipped.
+type TagSkipper interface {
+	SkippedLongTags() int
+}
+
 // ArtifactProvider is an optional interface. The reconciler calls it when the
 // newest release changes and copies the result to status.artifact. An error
 // or nil result keeps the previous status.artifact.
