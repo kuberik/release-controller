@@ -277,6 +277,13 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			return r.unreachable(ctx, &rs, st, now, interval, true, derr)
 		}
 		pre = &dres
+		// Persist the reset before any slice is deleted or written: a rebuild
+		// that dies after its first batch must not leave a stored
+		// backfillComplete=true next to a part-built catalogue.
+		st.Cursor, st.Newest, st.Artifact, st.Count, st.SliceCount, st.OpenSlice, st.BackfillComplete = "", nil, nil, 0, 0, "", false
+		if err := r.persist(ctx, &rs, st); err != nil {
+			return ctrl.Result{}, err
+		}
 		for i := range existing {
 			if err := r.Delete(ctx, &existing[i]); err != nil && !apierrors.IsNotFound(err) {
 				return ctrl.Result{}, err
@@ -284,9 +291,19 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 		r.event(&rs, "Normal", "IdentityChanged", fmt.Sprintf("source identity changed from %q to %q; catalogue rebuilt", old, id))
 		existing = nil
-		st.Cursor, st.Newest, st.Artifact, st.Count, st.SliceCount, st.OpenSlice, st.BackfillComplete = "", nil, nil, 0, 0, "", false
 		mem.backoff, mem.walk = map[string]backoffEntry{}, cat.WalkMemory{}
 		break
+	}
+
+	// A catalogue that is empty at sync start (first sync, or every slice
+	// deleted to rebuild) is rebuilt from scratch: the stored progress must say
+	// so before the first slice is written.
+	if len(existing) == 0 && (st.BackfillComplete || st.Count != 0 || st.SliceCount != 0 || st.OpenSlice != "" || st.Newest != nil) {
+		st.Cursor, st.Newest, st.Artifact, st.Count, st.SliceCount, st.OpenSlice, st.BackfillComplete = "", nil, nil, 0, 0, "", false
+		if err := r.persist(ctx, &rs, st); err != nil {
+			return ctrl.Result{}, err
+		}
+		mem.walk = cat.WalkMemory{}
 	}
 
 	mem.blockedID = ""
@@ -621,14 +638,21 @@ func (r *ReleaseSourceReconciler) setReady(st *kuberikcomv1alpha1.ReleaseSourceS
 	meta.SetStatusCondition(&st.Conditions, metav1.Condition{LastTransitionTime: metav1.NewTime(r.now()), Type: kuberikcomv1alpha1.ReadyCondition, Status: status, Reason: reason, Message: msg, ObservedGeneration: gen})
 }
 
+// persist writes status now (rebuild start) so later slice writes are never
+// ahead of the stored progress. A failure, a conflict included, is returned.
+func (r *ReleaseSourceReconciler) persist(ctx context.Context, rs *kuberikcomv1alpha1.ReleaseSource, st *kuberikcomv1alpha1.ReleaseSourceStatus) error {
+	if apiequality.Semantic.DeepEqual(rs.Status, *st) {
+		return nil
+	}
+	rs.Status = *st.DeepCopy()
+	return r.Status().Update(ctx, rs)
+}
+
 // finish writes status only if it changed and schedules the next sync.
 func (r *ReleaseSourceReconciler) finish(ctx context.Context, rs *kuberikcomv1alpha1.ReleaseSource, st *kuberikcomv1alpha1.ReleaseSourceStatus, interval, requeue time.Duration) (ctrl.Result, error) {
 	if !apiequality.Semantic.DeepEqual(rs.Status, *st) {
 		rs.Status = *st
 		if err := r.Status().Update(ctx, rs); err != nil {
-			if apierrors.IsConflict(err) {
-				return ctrl.Result{RequeueAfter: syncingRequeue}, nil
-			}
 			return ctrl.Result{}, err
 		}
 	}
