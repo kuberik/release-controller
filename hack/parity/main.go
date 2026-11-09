@@ -1,7 +1,11 @@
 // Command parity checks the OCI release source against rollout-controller's
 // current availableReleases (design/release-controller.md section 5, "Parity
-// definition"). Input is a baseline `kubectl get rollouts,imagepolicies,
-// imagerepositories -A -o json`; the registry is queried for real.
+// definition" and 3a rule 10). Input is a baseline `kubectl get rollouts,
+// imagepolicies, imagerepositories -A -o json`; the registry is queried for
+// real. The catalogue is built by the controller's own code: catalogue.Admit
+// (incremental + backfill admission) driven by a simulated sync loop with the
+// real resolve budget (50 per sync) until it completes, with slicer.Compute
+// writing the slices and applying whole-slice retention after every sync.
 //
 //	go run ./hack/parity --baseline a.json,b.json [--kubeconfig-context ctx]
 //
@@ -30,6 +34,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/kuberik/release-controller/api/v1alpha1"
+	"github.com/kuberik/release-controller/internal/catalogue"
+	"github.com/kuberik/release-controller/internal/slicer"
 	"github.com/kuberik/release-controller/internal/source"
 	"github.com/kuberik/release-controller/internal/source/oci"
 )
@@ -55,6 +61,11 @@ type rollout struct {
 	} `json:"spec"`
 	Status struct {
 		Available []todayRelease `json:"availableReleases"`
+		History   []struct {
+			Version struct {
+				Tag string `json:"tag"`
+			} `json:"version"`
+		} `json:"history"`
 	} `json:"status"`
 }
 
@@ -107,12 +118,16 @@ func load(path string) (*baseline, error) {
 	return b, nil
 }
 
-// catalogue is the from-scratch result for one ImagePolicy.
-type catalogue struct {
+// built is the from-scratch result for one ImagePolicy and retention.
+type built struct {
 	src      *oci.Source
-	rels     map[string]source.Release // every discovered+resolved tag
+	listed   map[string]bool           // every tag the listing returned
+	rels     map[string]source.Release // every tag the walk resolved (raw: created zero if absent)
 	rejected map[string]string
-	admitted []source.Release // monotonic, ascending
+	ever     map[string]source.Release // every release ever admitted (even if retention dropped it later)
+	final    []source.Release          // the catalogue after the last sync, sequence order
+	syncs    int
+	resolves int
 	note     string
 	err      error
 }
@@ -147,19 +162,19 @@ func main() {
 
 func run(b *baseline, now time.Time) int {
 	fmt.Printf("\n=== %s: %d rollouts ===\n", b.name, len(b.rollouts))
-	cats := map[string]*catalogue{}
+	cats := map[string]*built{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 4)
 	for i := range b.rollouts {
 		r := &b.rollouts[i]
-		key := r.Metadata.Namespace + "/" + r.Spec.ReleasesImagePolicy.Name
+		key := catKey(r)
 		mu.Lock()
 		if _, ok := cats[key]; ok {
 			mu.Unlock()
 			continue
 		}
-		c := &catalogue{}
+		c := &built{}
 		cats[key] = c
 		mu.Unlock()
 		wg.Add(1)
@@ -167,7 +182,7 @@ func run(b *baseline, now time.Time) int {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			build(b, r.Metadata.Namespace, r.Spec.ReleasesImagePolicy.Name, now, c)
+			build(b, r, now, c)
 		}()
 	}
 	wg.Wait()
@@ -179,7 +194,7 @@ func run(b *baseline, now time.Time) int {
 		if *only != "" && !strings.Contains(id, *only) {
 			continue
 		}
-		c := cats[r.Metadata.Namespace+"/"+r.Spec.ReleasesImagePolicy.Name]
+		c := cats[catKey(r)]
 		switch check(id, r, c, b, now) {
 		case "PASS":
 			pass++
@@ -193,7 +208,25 @@ func run(b *baseline, now time.Time) int {
 	return fail
 }
 
-func build(b *baseline, ns, polName string, now time.Time, c *catalogue) {
+func retentionOf(r *rollout) (days, minCount int32) {
+	days, minCount = 7, 30
+	if r.Spec.RetentionDays != nil {
+		days = *r.Spec.RetentionDays
+	}
+	if r.Spec.MinCount != nil {
+		minCount = *r.Spec.MinCount
+	}
+	return
+}
+
+func catKey(r *rollout) string {
+	d, m := retentionOf(r)
+	return fmt.Sprintf("%s/%s/%d/%d", r.Metadata.Namespace, r.Spec.ReleasesImagePolicy.Name, d, m)
+}
+
+func build(b *baseline, r *rollout, now time.Time, c *built) {
+	ns, polName := r.Metadata.Namespace, r.Spec.ReleasesImagePolicy.Name
+	days, minCount := retentionOf(r)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	pol := b.policies[ns+"/"+polName]
@@ -254,82 +287,58 @@ func build(b *baseline, ns, polName string, now time.Time, c *catalogue) {
 	}
 	c.rels = map[string]source.Release{}
 	c.rejected = map[string]string{}
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 8)
+	c.listed = map[string]bool{}
+	c.ever = map[string]source.Release{}
 	for _, ref := range res.Refs {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			rel, err := c.src.Resolve(ctx, ref)
-			mu.Lock()
-			defer mu.Unlock()
-			if err != nil {
-				c.rejected[ref.Tag] = err.Error()
+		c.listed[ref.Tag] = true
+	}
+	resolve := func(ref source.Ref) catalogue.Resolved {
+		var rel source.Release
+		var err error
+		for try := 0; try < 3; try++ { // a registry hiccup must not stall the simulated walk
+			rel, err = c.src.Resolve(ctx, ref)
+			if err != nil || !rel.MetadataUnresolved {
+				break
 			}
-			c.rels[ref.Tag] = rel
-		}()
-	}
-	wg.Wait()
-
-	// created: source value, else firstSeen (= now on a from-scratch build).
-	all := make([]source.Release, 0, len(c.rels))
-	for _, r := range c.rels {
-		if r.Created.IsZero() {
-			r.Created = metav1.NewTime(now)
-			r.CreatedObserved = true
+			if _, rejected := c.src.Rejection(ref.Tag); rejected {
+				break
+			}
 		}
-		all = append(all, r)
-	}
-	sort.Slice(all, func(i, j int) bool {
-		if !all[i].Created.Equal(&all[j].Created) {
-			return all[i].Created.Before(&all[j].Created)
+		c.rels[ref.Tag] = rel
+		out := catalogue.Resolved{Release: rel}
+		if err != nil {
+			c.rejected[ref.Tag] = err.Error()
+			out.Rejected = err.Error()
+		} else if msg, ok := c.src.Rejection(ref.Tag); ok {
+			c.rejected[ref.Tag] = msg
+			out.Rejected = msg
 		}
-		return all[i].Tag < all[j].Tag
-	})
-	if c.src.AdmitAll() {
-		c.admitted = all
-		return
+		return out
 	}
-	var max *source.Release
-	for i := range all {
-		if max == nil || c.src.Less(*max, all[i]) {
-			c.admitted = append(c.admitted, all[i])
-			max = &all[i]
+	// The controller's loop: Admit with the real budget, slicer.Compute for the
+	// writes and whole-slice retention, until the catalogue is complete.
+	scfg := slicer.Config{Namespace: ns, Source: "parity", Now: now, RetentionDays: days, MinCount: int(minCount), MaxPerSlice: 100, MaxBytes: 256 * 1024}
+	var slices []v1alpha1.ReleaseSlice
+	st := catalogue.State{}
+	for c.syncs = 0; c.syncs < 500; c.syncs++ {
+		ar := catalogue.Admit(st, res.Refs, catalogue.Config{Less: c.src.Less, Resolve: resolve, Budget: 50, Days: days, MinCount: int(minCount), Now: now})
+		c.resolves += ar.Resolves
+		for _, a := range ar.Admitted {
+			c.ever[a.Tag] = a
 		}
-	}
-}
-
-func retain(rels []source.Release, days, minCount int32, now time.Time) map[string]bool {
-	keep := map[string]bool{}
-	for i := len(rels) - 1; i >= 0; i-- { // newest first
-		n := len(rels) - i
-		r := rels[i]
-		young := days == 0 || !r.Created.Time.Before(now.AddDate(0, 0, -int(days)))
-		if n <= int(minCount) || young {
-			keep[r.Tag] = true
-		}
-	}
-	return keep
-}
-
-// blocker explains why tag was not admitted: the running max at its created
-// time that it does not exceed under the policy.
-func blocker(c *catalogue, rel source.Release) string {
-	var max *source.Release
-	for i := range c.admitted {
-		if c.admitted[i].Created.Time.After(rel.Created.Time) || (c.admitted[i].Created.Equal(&rel.Created) && c.admitted[i].Tag > rel.Tag) {
+		plan := slicer.Compute(slicer.Input{Existing: slices, New: ar.Admitted}, scfg)
+		slices, scfg.NextIndex = plan.Final, plan.NextIndex
+		st = catalogue.State{Catalogue: slicer.Merge(slices), BackfillComplete: ar.BackfillComplete}
+		if ar.Leftover == 0 && ar.BackfillComplete {
+			c.syncs++
 			break
 		}
-		max = &c.admitted[i]
+		if ar.Waiting {
+			c.err = fmt.Errorf("backfill stalled on a transient failure after %d syncs", c.syncs)
+			return
+		}
 	}
-	if max == nil {
-		return fmt.Sprintf("created %s", rel.Created.Format(time.RFC3339))
-	}
-	return fmt.Sprintf("created %s, rev %s; running max then: %s created %s, rev %s",
-		rel.Created.Format(time.RFC3339), str(rel.Revision), max.Tag, max.Created.Format(time.RFC3339), str(max.Revision))
+	c.final = st.Catalogue
 }
 
 // retagged: the registry's tag was pushed again after Flux/rollout-controller
@@ -346,31 +355,22 @@ func str(p *string) string {
 	return *p
 }
 
-func check(id string, r *rollout, c *catalogue, b *baseline, now time.Time) string {
-	days, minCount := int32(7), int32(30)
-	if r.Spec.RetentionDays != nil {
-		days = *r.Spec.RetentionDays
-	}
-	if r.Spec.MinCount != nil {
-		minCount = *r.Spec.MinCount
-	}
+func check(id string, r *rollout, c *built, b *baseline, now time.Time) string {
+	days, minCount := retentionOf(r)
 	if c.err != nil {
 		fmt.Printf("FAIL %s: cannot build catalogue: %v\n", id, c.err)
 		return "FAIL"
 	}
-	keep := retain(c.admitted, days, minCount, now)
-	var cat []source.Release
+	cat := c.final
 	pos := map[string]int{}
-	for _, a := range c.admitted {
-		if keep[a.Tag] {
-			pos[a.Tag] = len(cat)
-			cat = append(cat, a)
-		}
+	for i, a := range cat {
+		pos[a.Tag] = i
 	}
-	admitted := map[string]bool{}
-	for _, a := range c.admitted {
-		admitted[a.Tag] = true
+	deployed := ""
+	if len(r.Status.History) > 0 {
+		deployed = r.Status.History[0].Version.Tag
 	}
+	stub := func(tag string) source.Release { return source.Release{Tag: tag} }
 
 	var problems, accepted, warns []string
 	today := map[string]todayRelease{}
@@ -391,29 +391,38 @@ func check(id string, r *rollout, c *catalogue, b *baseline, now time.Time) stri
 	}
 	// rule 1, 2, 3
 	for _, t := range r.Status.Available {
-		got, discovered := c.rels[t.Tag]
 		p, inCat := pos[t.Tag]
+		raw, resolved := c.rels[t.Tag]
+		_, wasAdmitted := c.ever[t.Tag]
 		switch {
-		case !discovered:
+		case !c.listed[t.Tag]:
 			accepted = append(accepted, fmt.Sprintf("%s: gone from registry or excluded by filter (today keeps deleted tags; unreproducible)", t.Tag))
 			continue
-		case !admitted[t.Tag] && retagged(t, got):
-			warns = append(warns, fmt.Sprintf("%s: RETAGGED since observed (today created %s, registry now %s, rev %s -> %s); created order then disagrees with the policy so monotonic admission excludes it", t.Tag, t.Created.Format(time.RFC3339), got.Created.Format(time.RFC3339), str(t.Revision), str(got.Revision)))
-			continue
-		case !admitted[t.Tag]:
-			problems = append(problems, fmt.Sprintf("rule1 %s: discovered but not admitted by monotonic rule (%s)", t.Tag, blocker(c, got)))
+		case !inCat && !wasAdmitted && resolved && retagged(t, raw):
+			warns = append(warns, fmt.Sprintf("%s: RETAGGED since observed (today created %s, registry now %s, rev %s -> %s); the created rule then disagrees with the policy order so backfill excludes it", t.Tag, t.Created.Format(time.RFC3339), raw.Created.Format(time.RFC3339), str(t.Revision), str(raw.Revision)))
 			continue
 		case !inCat:
-			accepted = append(accepted, fmt.Sprintf("%s: admitted but dropped by retention (days=%d minCount=%d; accepted difference: history-keep no longer applies)", t.Tag, days, minCount))
+			why := "dropped by whole-slice retention"
+			if !wasAdmitted && resolved {
+				why = "excluded by the created rule"
+			} else if !wasAdmitted {
+				why = "not reached: older than the retention window"
+			}
+			if deployed != "" && c.src.Less(stub(t.Tag), stub(deployed)) {
+				accepted = append(accepted, fmt.Sprintf("%s: history-keep (%s; older than the deployed %s; days=%d minCount=%d)", t.Tag, why, deployed, days, minCount))
+			} else {
+				problems = append(problems, fmt.Sprintf("rule1 %s: not in the catalogue (%s) and not older than the deployed tag %q", t.Tag, why, deployed))
+			}
 			continue
 		}
+		got := cat[p]
 		// rule 2
 		if d := diff(t, got); d != "" && retagged(t, got) {
 			warns = append(warns, fmt.Sprintf("%s: RETAGGED since observed (today's entry is stale, never refreshed): %s", t.Tag, d))
 		} else if d != "" {
 			problems = append(problems, fmt.Sprintf("rule2 %s: %s", t.Tag, d))
 		}
-		// rule 3
+		// rule 3: the catalogue order is the sequence order
 		if p < lastPos {
 			problems = append(problems, fmt.Sprintf("rule3 %s: order differs from today's list", t.Tag))
 		}
@@ -424,7 +433,7 @@ func check(id string, r *rollout, c *catalogue, b *baseline, now time.Time) stri
 	created := r.Metadata.CreationTimestamp.Time
 	var latest *source.Release
 	if pol := b.policies[r.Metadata.Namespace+"/"+r.Spec.ReleasesImagePolicy.Name]; pol != nil && pol.Status.LatestRef != nil {
-		if l, ok := c.rels[pol.Status.LatestRef.Tag]; ok {
+		if l, ok := c.ever[pol.Status.LatestRef.Tag]; ok {
 			latest = &l
 		}
 	}
@@ -470,8 +479,8 @@ func check(id string, r *rollout, c *catalogue, b *baseline, now time.Time) stri
 	for _, k := range keys {
 		rs = append(rs, fmt.Sprintf("%s=%d", k, len(reasons[k])))
 	}
-	fmt.Printf("%s %s: today=%d catalogue=%d (admitted=%d discovered=%d) extras{%s}\n",
-		verdict, id, len(r.Status.Available), len(cat), len(c.admitted), len(c.rels), strings.Join(rs, " "))
+	fmt.Printf("%s %s: today=%d catalogue=%d (admitted=%d listed=%d resolves=%d syncs=%d) deployed=%s extras{%s}\n",
+		verdict, id, len(r.Status.Available), len(cat), len(c.ever), len(c.listed), c.resolves, c.syncs, deployed, strings.Join(rs, " "))
 	if c.note != "" {
 		fmt.Printf("     note: %s\n", c.note)
 	}

@@ -347,16 +347,35 @@ func Compute(in Input, cfg Config) Plan {
 		total += len(s.Releases)
 	}
 	deleted := map[string]bool{}
+	var maxSeq int64
+	for i, s := range slices {
+		for j, r := range s.Releases {
+			if (i == 0 && j == 0) || r.Sequence > maxSeq {
+				maxSeq = r.Sequence
+			}
+		}
+	}
+	holdsNewest := func(s v1alpha1.ReleaseSlice) bool {
+		for _, r := range s.Releases {
+			if r.Sequence == maxSeq {
+				return true
+			}
+		}
+		return false
+	}
 	if cfg.RetentionDays > 0 {
 		cutoff := cfg.Now.Add(-time.Duration(cfg.RetentionDays) * 24 * time.Hour)
 		bySeq := make([]v1alpha1.ReleaseSlice, len(slices))
 		copy(bySeq, slices)
 		sort.SliceStable(bySeq, func(i, j int) bool { return minSeq(bySeq[i]) < minSeq(bySeq[j]) })
 		for _, s := range bySeq {
-			if !s.Sealed {
-				continue // the open slice is never deleted, and may hold the lowest sequences
-			}
-			if total-len(s.Releases) < cfg.MinCount {
+			// The open slice is never deleted. If it holds the lowest sequences
+			// (a backfill filled it) it also stops retention: deleting newer
+			// sealed slices past it would leave a hole below kept releases.
+			// The slice holding the newest release stays too: it is the anchor
+			// of incremental admission (a catalogue maximum that vanished
+			// would re-admit everything above the next one).
+			if !s.Sealed || holdsNewest(s) || total-len(s.Releases) < cfg.MinCount {
 				break
 			}
 			expired := true

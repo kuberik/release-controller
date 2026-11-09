@@ -117,7 +117,6 @@ func EncodedSize2(r v1alpha1.Release) int {
 	return EncodedSize(&v1alpha1.ReleaseSlice{Releases: []v1alpha1.Release{r}}) - EncodedSize(&v1alpha1.ReleaseSlice{Releases: []v1alpha1.Release{}})
 }
 
-
 // Existing releases never move: a backfill batch (lower sequences, descending
 // admission order) fills the open slice next to its neighbours and overflows
 // into new slices; every slice is sorted by sequence.
@@ -261,19 +260,27 @@ func TestRetentionOldestByMinSequenceNotName(t *testing.T) {
 	c := cfg(2)
 	c.RetentionDays = 7
 	c.MinCount = 0
-	// slice 00000 holds the NEWEST (seq 9,10, fresh), 00001 the older (7,8), 00002 the oldest (5,6).
-	fresh := func(tag string, seq int) v1alpha1.Release {
-		r := rel(tag, seq)
-		r.Created = metav1.NewTime(c.Now)
-		return r
+	mk := func(name string, sealed bool, seqs ...int) v1alpha1.ReleaseSlice {
+		s := v1alpha1.ReleaseSlice{Source: "src", Sealed: sealed}
+		s.Name, s.Namespace = name, "ns"
+		for _, q := range seqs {
+			s.Releases = append(s.Releases, rel(fmt.Sprintf("k%d", q), q))
+		}
+		return s
 	}
-	s0 := Compute(Input{New: []v1alpha1.Release{fresh("n10", 10), fresh("n9", 9)}}, cfg(2)).Final
-	c1 := cfg(2)
-	c1.NextIndex = 1
-	s1 := Compute(Input{Existing: s0, New: []v1alpha1.Release{rel("o8", 8), rel("o7", 7), rel("p6", 6), rel("p5", 5), rel("p4", 4)}}, c1).Final
-	p := Compute(Input{Existing: s1}, c)
-	// expired: 00001 (8,7) and 00002 (6,5); 00000 is fresh and sealed; the open 00003 (4) stays.
-	eq(t, p.Deletes, "src-00001", "src-00002")
+	fresh := mk("src-00000", true, 9, 10)
+	for i := range fresh.Releases {
+		fresh.Releases[i].Created = metav1.NewTime(c.Now)
+	}
+	// 00000 newest (fresh), 00001 middle, 00002 oldest, 00003 open with the highest sequences.
+	in := []v1alpha1.ReleaseSlice{fresh, mk("src-00001", true, 7, 8), mk("src-00002", true, 5, 6), mk("src-00003", false, 11)}
+	p := Compute(Input{Existing: in}, c)
+	eq(t, p.Deletes, "src-00001", "src-00002") // by min sequence; 00000 is fresh and stops it
+	// an open slice holding the lowest sequences blocks retention (no holes)
+	in = []v1alpha1.ReleaseSlice{fresh, mk("src-00001", true, 7, 8), mk("src-00002", false, 1, 2)}
+	if p = Compute(Input{Existing: in}, c); len(p.Deletes) != 0 {
+		t.Fatalf("deleted %v", p.Deletes)
+	}
 }
 
 func TestRetentionStopsAtFirstUnexpired(t *testing.T) {
@@ -323,5 +330,20 @@ func TestSubSecondNoSpuriousUpdate(t *testing.T) {
 	s := Compute(Input{New: []v1alpha1.Release{r}}, c).Final
 	if p := Compute(Input{Existing: s, New: []v1alpha1.Release{r}}, c); !p.Empty() {
 		t.Fatal("spurious")
+	}
+}
+
+func TestRetentionKeepsTheSliceHoldingTheNewest(t *testing.T) {
+	c := cfg(2)
+	c.RetentionDays = 7
+	c.MinCount = 0
+	s := Compute(Input{New: []v1alpha1.Release{rel("a", 1), rel("b", 2)}}, cfg(2)).Final // one sealed slice, all expired
+	if p := Compute(Input{Existing: s}, c); len(p.Deletes) != 0 {
+		t.Fatalf("deleted the slice with the newest release: %v", p.Deletes)
+	}
+	s = Compute(Input{Existing: s, New: []v1alpha1.Release{rel("c", 3)}}, cfg(2)).Final
+	c.NextIndex = 2
+	if p := Compute(Input{Existing: s}, c); len(p.Deletes) != 1 {
+		t.Fatalf("deletes %v", p.Deletes)
 	}
 }

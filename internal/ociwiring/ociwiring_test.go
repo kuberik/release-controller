@@ -53,10 +53,12 @@ func (r *countingReader) Get(ctx context.Context, key client.ObjectKey, obj clie
 }
 
 type env struct {
-	gets *sync.Map
-	c    client.Client
-	host string
-	put  func(repo, tag string, ann map[string]string)
+	// manifestReqs counts registry requests for manifests (HEAD and GET), per tag.
+	manifestReqs *sync.Map
+	gets         *sync.Map
+	c            client.Client
+	host         string
+	put          func(repo, tag string, ann map[string]string)
 }
 
 func binaryDir() string {
@@ -76,7 +78,7 @@ func binaryDir() string {
 // start boots envtest (with the Flux image CRDs only when flux is true), a
 // real manager and the real reconciler (nil SourceFactory: the registered OCI
 // factory), and an in-memory registry.
-func start(t *testing.T, flux bool) *env {
+func start(t *testing.T, flux bool, budget int) *env {
 	t.Helper()
 	gets := &sync.Map{}
 	crds := []string{filepath.Join("..", "..", "config", "crd", "bases")}
@@ -106,7 +108,7 @@ func start(t *testing.T, flux bool) *env {
 	}
 	if err := (&controller.ReleaseSourceReconciler{
 		Client: mgr.GetClient(), APIReader: &countingReader{Reader: mgr.GetAPIReader(), gets: gets}, Scheme: scheme,
-		MaxReleasesPerSlice: 5, MaxSliceBytes: 256 * 1024, MaxResolvesPerSync: 1000, MaxConcurrentReconciles: 2,
+		MaxReleasesPerSlice: 5, MaxSliceBytes: 256 * 1024, MaxResolvesPerSync: budget, MaxConcurrentReconciles: 2,
 	}).SetupWithManager(mgr); err != nil {
 		t.Fatal(err)
 	}
@@ -121,13 +123,21 @@ func start(t *testing.T, flux bool) *env {
 		}
 	})
 
-	srv := httptest.NewServer(registry.New())
+	manifestReqs := &sync.Map{}
+	reg := registry.New()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if (req.Method == http.MethodGet || req.Method == http.MethodHead) && strings.Contains(req.URL.Path, "/manifests/") {
+			n, _ := manifestReqs.LoadOrStore(req.URL.Path[strings.LastIndex(req.URL.Path, "/")+1:], new(int32))
+			atomic.AddInt32(n.(*int32), 1)
+		}
+		reg.ServeHTTP(w, req)
+	}))
 	t.Cleanup(srv.Close)
 	c, err := client.New(cfg, client.Options{Scheme: scheme})
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &env{gets: gets, c: c, host: strings.TrimPrefix(srv.URL, "http://")}
+	e := &env{manifestReqs: manifestReqs, gets: gets, c: c, host: strings.TrimPrefix(srv.URL, "http://")}
 	e.put = func(repo, tag string, ann map[string]string) {
 		cfgDesc := map[string]any{"mediaType": "application/vnd.oci.image.config.v1+json", "digest": "sha256:" + strings.Repeat("a", 64), "size": 2}
 		man := map[string]any{"schemaVersion": 2, "mediaType": mtManifest, "config": cfgDesc, "layers": []any{}}
@@ -203,7 +213,7 @@ func (e *env) events(g Gomega, name, reason string) []corev1.Event {
 
 func TestOCIEndToEnd(t *testing.T) {
 	g := NewWithT(t)
-	e := start(t, false) // no Flux CRDs: the manager must start without informers for them
+	e := start(t, false, 1000) // no Flux CRDs: the manager must start without informers for them
 	ctx := context.Background()
 	const name = "app"
 	for i := 1; i <= 7; i++ {
@@ -248,17 +258,20 @@ func TestOCIEndToEnd(t *testing.T) {
 	}, 30*time.Second, 250*time.Millisecond).Should(Succeed())
 
 	By := func(s string) { t.Log(s) }
-	By("7 tags -> slices of 5 + 2, ordered, artifact filled")
+	By("7 tags -> backfill walks newest first: slice 0 = v003..v007, the open slice 1 = v001, v002; artifact filled")
 	g.Eventually(func(g Gomega) {
 		s := e.slices(g, name)
 		g.Expect(s).To(HaveLen(2))
-		g.Expect(tags(s[0])).To(Equal([]string{"v001", "v002", "v003", "v004", "v005"}))
+		g.Expect(tags(s[0])).To(Equal([]string{"v003", "v004", "v005", "v006", "v007"}))
 		g.Expect(s[0].Sealed).To(BeTrue())
-		g.Expect(tags(s[1])).To(Equal([]string{"v006", "v007"}))
+		g.Expect(tags(s[1])).To(Equal([]string{"v001", "v002"}))
 		g.Expect(s[1].Sealed).To(BeFalse())
 		var got v1alpha1.ReleaseSource
 		g.Expect(e.c.Get(ctx, client.ObjectKeyFromObject(rs), &got)).To(Succeed())
 		g.Expect(got.Status.Count).To(Equal(int32(7)))
+		g.Expect(got.Status.SliceCount).To(Equal(int32(2)))
+		g.Expect(got.Status.OpenSlice).To(Equal(s[1].Name))
+		g.Expect(got.Status.BackfillComplete).To(BeTrue())
 		g.Expect(got.Status.Newest).NotTo(BeNil())
 		g.Expect(got.Status.Newest.Tag).To(Equal("v007"))
 		g.Expect(got.Status.Artifact).NotTo(BeNil())
@@ -280,7 +293,7 @@ func TestOCIEndToEnd(t *testing.T) {
 	g.Eventually(func(g Gomega) {
 		s := e.slices(g, name)
 		g.Expect(s).To(HaveLen(2))
-		g.Expect(tags(s[1])).To(Equal([]string{"v006", "v007", "v008"}))
+		g.Expect(tags(s[1])).To(Equal([]string{"v001", "v002", "v008"})) // the open slice takes new releases
 	}, 60*time.Second, 250*time.Millisecond).Should(Succeed())
 	after := e.slices(g, name)
 	g.Expect(after[0].ResourceVersion).To(Equal(before[0].ResourceVersion), "sealed slice must not be written")
@@ -354,7 +367,7 @@ func TestOCIEndToEnd(t *testing.T) {
 
 func TestOCIImagePolicyRef(t *testing.T) {
 	g := NewWithT(t)
-	e := start(t, true)
+	e := start(t, true, 1000)
 	ctx := context.Background()
 	for i := 1; i <= 3; i++ {
 		e.put("pol", fmt.Sprintf("rel-%d", i), created(50-i))
@@ -395,4 +408,88 @@ func TestOCIImagePolicyRef(t *testing.T) {
 		g.Expect(ok).To(BeTrue(), typ)
 		g.Expect(atomic.LoadInt32(n.(*int32))).To(BeNumerically(">", 0), typ)
 	}
+}
+
+// 120 tags, resolve budget 50, a policy: every tag inside the retention window
+// is admitted across syncs, sequences follow the policy strictly, tags older
+// than the window are never resolved, and a restarted reconciler costs no
+// manifest requests at all (tags below the maximum are never touched).
+func TestOCIBudgetBackfillAndRestart(t *testing.T) {
+	g := NewWithT(t)
+	e := start(t, false, 50)
+	ctx := context.Background()
+	const name = "big"
+	for i := 1; i <= 120; i++ {
+		ann := created(200 - i) // minutes ago: inside the 7 day window
+		if i <= 40 {
+			ann["org.opencontainers.image.created"] = time.Now().Add(-20 * 24 * time.Hour).Add(time.Duration(i) * time.Minute).UTC().Format(time.RFC3339)
+		}
+		e.put("big", fmt.Sprintf("v%03d", i), ann)
+	}
+	rs := &v1alpha1.ReleaseSource{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Spec: v1alpha1.ReleaseSourceSpec{
+			Interval: &metav1.Duration{Duration: time.Hour},
+			OCI: &v1alpha1.OCISource{
+				Image: e.host + "/big", Insecure: true,
+				FilterTags: &v1alpha1.TagFilter{Pattern: `^v[0-9]+$`},
+				Policy:     &v1alpha1.OrderPolicy{Alphabetical: &v1alpha1.AlphabeticalPolicy{Order: "asc"}},
+			},
+		},
+	}
+	g.Expect(e.c.Create(ctx, rs)).To(Succeed())
+
+	// v120..v041 are in the window; v040 is the first past it (and minCount 30
+	// is met), where the walk stops: 81 releases.
+	g.Eventually(func(g Gomega) {
+		var got v1alpha1.ReleaseSource
+		g.Expect(e.c.Get(ctx, client.ObjectKeyFromObject(rs), &got)).To(Succeed())
+		g.Expect(got.Status.BackfillComplete).To(BeTrue())
+		g.Expect(got.Status.Count).To(Equal(int32(81)))
+	}, 90*time.Second, 250*time.Millisecond).Should(Succeed())
+
+	var all []v1alpha1.Release
+	for _, s := range e.slices(g, name) {
+		all = append(all, s.Releases...)
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].Sequence < all[j].Sequence })
+	g.Expect(all).To(HaveLen(81))
+	for i, r := range all {
+		g.Expect(r.Tag).To(Equal(fmt.Sprintf("v%03d", 40+i)), "catalogue order must be policy order")
+		g.Expect(r.MetadataUnresolved).To(BeFalse())
+		if i > 0 {
+			g.Expect(r.Sequence).To(BeNumerically(">", all[i-1].Sequence))
+		}
+	}
+	for i := 1; i < 40; i++ { // never resolved: below the stop
+		_, requested := e.manifestReqs.Load(fmt.Sprintf("v%03d", i))
+		g.Expect(requested).To(BeFalse(), fmt.Sprintf("v%03d is older than the window and must not be resolved", i))
+	}
+
+	// a new tag arrives: admitted incrementally above the maximum
+	e.put("big", "v121", created(1))
+	e.kick(t, name)
+	g.Eventually(func(g Gomega) {
+		var got v1alpha1.ReleaseSource
+		g.Expect(e.c.Get(ctx, client.ObjectKeyFromObject(rs), &got)).To(Succeed())
+		g.Expect(got.Status.Count).To(Equal(int32(82)))
+		g.Expect(got.Status.Newest.Tag).To(Equal("v121"))
+	}, 60*time.Second, 250*time.Millisecond).Should(Succeed())
+
+	// restart: a fresh reconciler instance (no memory) syncs the same source.
+	reqs := func() int32 {
+		var n int32
+		e.manifestReqs.Range(func(_, v any) bool { n += atomic.LoadInt32(v.(*int32)); return true })
+		return n
+	}
+	before := reqs()
+	fresh := &controller.ReleaseSourceReconciler{Client: e.c, APIReader: e.c, Scheme: e.c.Scheme(),
+		MaxReleasesPerSlice: 5, MaxSliceBytes: 256 * 1024, MaxResolvesPerSync: 50}
+	_, err := fresh.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(rs)})
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(reqs()-before).To(BeZero(), "a restart must not fetch any manifest")
+	var got v1alpha1.ReleaseSource
+	g.Expect(e.c.Get(ctx, client.ObjectKeyFromObject(rs), &got)).To(Succeed())
+	g.Expect(got.Status.Count).To(Equal(int32(82)))
+	t.Logf("registry manifest requests so far: %d (81+1 tags resolved, HEAD+GET each)", reqs())
 }

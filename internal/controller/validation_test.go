@@ -9,6 +9,7 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 
 	v1alpha1 "github.com/kuberik/release-controller/api/v1alpha1"
@@ -50,6 +51,19 @@ var _ = Describe("CRD validation", func() {
 			Expect(k8sClient.Get(ctx, clientKey(s), s)).To(Succeed())
 			s.Source = "other"
 			Expect(k8sClient.Update(ctx, s)).NotTo(Succeed())
+		})
+
+		It("requires sequence on a release (it is always serialised, 0 is a value)", func() {
+			s := slice("v-seq", 1)
+			s.Releases[0].Sequence = -7
+			Expect(k8sClient.Create(ctx, s)).To(Succeed()) // negative: backfilled releases count down
+			bad := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": "kuberik.com/v1alpha1", "kind": "ReleaseSlice",
+				"metadata": map[string]any{"name": "v-noseq", "namespace": "default"},
+				"source":   "x", "sealed": false,
+				"releases": []any{map[string]any{"tag": "a", "created": "2026-11-01T00:00:00Z", "firstSeen": "2026-11-01T00:00:00Z"}},
+			}}
+			Expect(k8sClient.Create(ctx, bad)).NotTo(Succeed())
 		})
 
 		It("accepts sealed false->true", func() {
@@ -94,11 +108,21 @@ var _ = Describe("CRD validation", func() {
 			})
 		}
 		ref := &corev1.LocalObjectReference{Name: "p"}
+		alpha := &v1alpha1.OrderPolicy{Alphabetical: &v1alpha1.AlphabeticalPolicy{}}
+
+		// Replaces QA probes P5/P7 (no-policy churn, no-policy early stop):
+		// without a policy there is no ordering, so the spec is refused.
+		It("requires a policy with image (imagePolicyRef carries it in the ImagePolicy)", func() {
+			Expect(mk("s-nopolicy", &v1alpha1.OCISource{Image: "a/b"})).NotTo(Succeed())
+			Expect(mk("s-nopolicy-filter", &v1alpha1.OCISource{Image: "a/b", FilterTags: &v1alpha1.TagFilter{Pattern: "^v"}})).NotTo(Succeed())
+			Expect(mk("s-policy", &v1alpha1.OCISource{Image: "a/b", Policy: &v1alpha1.OrderPolicy{SemVer: &v1alpha1.SemVerPolicy{Range: ">=1.0.0"}}})).To(Succeed())
+			Expect(mk("s-ref-nopolicy", &v1alpha1.OCISource{ImagePolicyRef: ref})).To(Succeed())
+		})
 
 		It("requires exactly one of image / imagePolicyRef", func() {
 			Expect(mk("s-neither", &v1alpha1.OCISource{})).NotTo(Succeed())
 			Expect(mk("s-both", &v1alpha1.OCISource{Image: "a/b", ImagePolicyRef: ref})).NotTo(Succeed())
-			Expect(mk("s-image", &v1alpha1.OCISource{Image: "a/b"})).To(Succeed())
+			Expect(mk("s-image", &v1alpha1.OCISource{Image: "a/b", Policy: alpha})).To(Succeed())
 			Expect(mk("s-ref", &v1alpha1.OCISource{ImagePolicyRef: ref})).To(Succeed())
 		})
 
@@ -107,7 +131,7 @@ var _ = Describe("CRD validation", func() {
 		})
 
 		It("defaults interval and retention and enforces min interval", func() {
-			Expect(mk("s-defaults", &v1alpha1.OCISource{Image: "a/b"})).To(Succeed())
+			Expect(mk("s-defaults", &v1alpha1.OCISource{Image: "a/b", Policy: alpha})).To(Succeed())
 			got := &v1alpha1.ReleaseSource{}
 			Expect(k8sClient.Get(ctx, clientKey(&v1alpha1.ReleaseSource{ObjectMeta: metav1.ObjectMeta{Name: "s-defaults", Namespace: "default"}}), got)).To(Succeed())
 			Expect(got.Spec.Interval.Duration.String()).To(Equal("1m0s"))
@@ -117,7 +141,7 @@ var _ = Describe("CRD validation", func() {
 			short := &v1alpha1.ReleaseSource{
 				ObjectMeta: metav1.ObjectMeta{Name: "s-short", Namespace: "default"},
 				Spec: v1alpha1.ReleaseSourceSpec{
-					OCI:      &v1alpha1.OCISource{Image: "a/b"},
+					OCI:      &v1alpha1.OCISource{Image: "a/b", Policy: alpha},
 					Interval: &metav1.Duration{Duration: 5 * 1e9},
 				},
 			}
@@ -125,7 +149,7 @@ var _ = Describe("CRD validation", func() {
 		})
 
 		It("rejects names over 230 characters", func() {
-			Expect(mk(strings.Repeat("a", 231), &v1alpha1.OCISource{Image: "a/b"})).NotTo(Succeed())
+			Expect(mk(strings.Repeat("a", 231), &v1alpha1.OCISource{Image: "a/b", Policy: alpha})).NotTo(Succeed())
 		})
 	})
 })

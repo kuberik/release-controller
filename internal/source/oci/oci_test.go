@@ -439,7 +439,8 @@ func TestSecretRefAuth(t *testing.T) {
 
 	rs := &v1alpha1.ReleaseSource{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "rs"},
 		Spec: v1alpha1.ReleaseSourceSpec{OCI: &v1alpha1.OCISource{
-			Image: r.host + "/app", Insecure: true, SecretRef: &corev1.LocalObjectReference{Name: "creds"}}}}
+			Image: r.host + "/app", Insecure: true, SecretRef: &corev1.LocalObjectReference{Name: "creds"},
+			Policy: &v1alpha1.OrderPolicy{Alphabetical: &v1alpha1.AlphabeticalPolicy{}}}}}
 	src, err := Factory(context.Background(), c, rs)
 	if err != nil {
 		t.Fatal(err)

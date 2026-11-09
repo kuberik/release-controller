@@ -423,6 +423,9 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if res.WalkPos == "" {
 		mem.walkPos = walkAfter
 	}
+	if res.BackfillComplete {
+		mem.walkMin, mem.walkPos = "", "" // a later rebuild (all slices deleted) walks from the top again
+	}
 	leftover := res.Leftover + repairLeft
 
 	// 4. Plan and apply.
