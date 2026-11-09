@@ -48,6 +48,20 @@ type Source interface {
 	Less(a, b Release) bool
 }
 
+// AdmitAll is an optional interface. A source that returns true has no
+// ordering policy: the reconciler skips monotonic admission and admits every
+// discovered release (OCI with neither policy nor imagePolicyRef policy).
+type AdmitAll interface {
+	AdmitAll() bool
+}
+
+// ArtifactProvider is an optional interface. The reconciler calls it when the
+// newest release changes and copies the result to status.artifact. An error
+// or nil result keeps the previous status.artifact.
+type ArtifactProvider interface {
+	Artifact(ctx context.Context, newest Release) (*v1alpha1.ArtifactMetadata, error)
+}
+
 // Factory builds a Source from a ReleaseSource; it reads secrets and
 // referenced objects through the given namespace-scoped client.
 type Factory func(ctx context.Context, c client.Reader, rs *v1alpha1.ReleaseSource) (Source, error)
