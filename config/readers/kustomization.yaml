@@ -1,0 +1,7 @@
+# Optional: binds release-controller-reader to the kuberik controllers that read
+# the catalogue (design §10). Not part of config/default because those service
+# accounts only exist where the rest of kuberik is installed.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- readers.yaml

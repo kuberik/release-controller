@@ -1,0 +1,26 @@
+# Dev overlay for the kind clusters. Deployed with ko, never `ko apply`
+# (it uses the current kubectl context); see hack/deploy-kind.sh.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: kuberik-system
+resources:
+- ../default
+patches:
+# A tag after ko:// breaks ko resolve, so patch the image instead of images:.
+- target:
+    kind: Deployment
+    name: controller-manager
+  patch: |-
+    - op: replace
+      path: /spec/template/spec/containers/0/image
+      value: ko://github.com/kuberik/release-controller/cmd
+# kuberik-system already exists (owned by the other kuberik controllers).
+- target:
+    kind: Namespace
+    name: system
+  patch: |-
+    $patch: delete
+    apiVersion: v1
+    kind: Namespace
+    metadata:
+      name: system
