@@ -119,6 +119,12 @@ var _ = Describe("CRD validation", func() {
 			Expect(mk("s-ref-nopolicy", &v1alpha1.OCISource{ImagePolicyRef: ref})).To(Succeed())
 		})
 
+		It("rejects policy and filterTags with imagePolicyRef (they come from the ImagePolicy)", func() {
+			Expect(mk("s-ref-policy", &v1alpha1.OCISource{ImagePolicyRef: ref, Policy: alpha})).NotTo(Succeed())
+			Expect(mk("s-ref-filter", &v1alpha1.OCISource{ImagePolicyRef: ref, FilterTags: &v1alpha1.TagFilter{Pattern: "^v"}})).NotTo(Succeed())
+			Expect(mk("s-ref-plain", &v1alpha1.OCISource{ImagePolicyRef: ref, Insecure: true})).To(Succeed())
+		})
+
 		It("requires exactly one of image / imagePolicyRef", func() {
 			Expect(mk("s-neither", &v1alpha1.OCISource{})).NotTo(Succeed())
 			Expect(mk("s-both", &v1alpha1.OCISource{Image: "a/b", ImagePolicyRef: ref})).NotTo(Succeed())

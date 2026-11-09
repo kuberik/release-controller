@@ -85,7 +85,8 @@ spec:
                   imagePolicyRef:
                     description: |-
                       ImagePolicyRef reads image, secretRef, filterTags and policy from an
-                      existing Flux ImagePolicy and its ImageRepository (spec only).
+                      existing Flux ImagePolicy and its ImageRepository (spec only); policy
+                      and filterTags must not be set with it.
                     properties:
                       name:
                         default: ""
@@ -160,6 +161,9 @@ spec:
                   rule: has(self.image) != has(self.imagePolicyRef)
                 - message: policy is required when image is set
                   rule: '!has(self.image) || has(self.policy)'
+                - message: policy and filterTags come from the ImagePolicy and must
+                    not be set with imagePolicyRef
+                  rule: '!has(self.imagePolicyRef) || (!has(self.policy) && !has(self.filterTags))'
               retention:
                 default: {}
                 description: Retention controls when whole old slices are dropped.

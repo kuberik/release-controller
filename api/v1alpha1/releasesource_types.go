@@ -76,6 +76,7 @@ type Retention struct {
 // OCISource configures an OCI repository source.
 // +kubebuilder:validation:XValidation:rule="has(self.image) != has(self.imagePolicyRef)",message="exactly one of image or imagePolicyRef must be set"
 // +kubebuilder:validation:XValidation:rule="!has(self.image) || has(self.policy)",message="policy is required when image is set"
+// +kubebuilder:validation:XValidation:rule="!has(self.imagePolicyRef) || (!has(self.policy) && !has(self.filterTags))",message="policy and filterTags come from the ImagePolicy and must not be set with imagePolicyRef"
 type OCISource struct {
 	// Image is the repository, e.g. ghcr.io/org/app.
 	// +kubebuilder:validation:MaxLength=512
@@ -96,7 +97,8 @@ type OCISource struct {
 	// +optional
 	Policy *OrderPolicy `json:"policy,omitempty"`
 	// ImagePolicyRef reads image, secretRef, filterTags and policy from an
-	// existing Flux ImagePolicy and its ImageRepository (spec only).
+	// existing Flux ImagePolicy and its ImageRepository (spec only); policy
+	// and filterTags must not be set with it.
 	// +optional
 	ImagePolicyRef *corev1.LocalObjectReference `json:"imagePolicyRef,omitempty"`
 }
