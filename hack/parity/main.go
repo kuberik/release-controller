@@ -63,7 +63,8 @@ type rollout struct {
 		Available []todayRelease `json:"availableReleases"`
 		History   []struct {
 			Version struct {
-				Tag string `json:"tag"`
+				Tag     string       `json:"tag"`
+				Created *metav1.Time `json:"created,omitempty"`
 			} `json:"version"`
 		} `json:"history"`
 	} `json:"status"`
@@ -204,7 +205,7 @@ func run(b *baseline, now time.Time) int {
 			fail++
 		}
 	}
-	fmt.Printf("--- %s: %d PASS, %d WARN (retagged since observed), %d FAIL\n", b.name, pass, warn, fail)
+	fmt.Printf("--- %s: %d PASS, %d WARN (retagged, or deployed tag served by the reader fallback), %d FAIL\n", b.name, pass, warn, fail)
 	return fail
 }
 
@@ -407,6 +408,28 @@ func check(id string, r *rollout, c *built, b *baseline, now time.Time) string {
 				why = "excluded by the created rule"
 			} else if !wasAdmitted {
 				why = "not reached: older than the retention window"
+			}
+			if deployed != "" && t.Tag == deployed {
+				// §3a.9: rollout-controller falls back to catalogue releases
+				// created after the deployed history entry. Only acceptable
+				// when that fallback actually yields candidates.
+				var dc *time.Time
+				if hc := r.Status.History[0].Version.Created; hc != nil {
+					tt := hc.Time
+					dc = &tt
+				}
+				newer := 0
+				for _, cr := range cat {
+					if dc != nil && cr.Created.Time.After(*dc) {
+						newer++
+					}
+				}
+				if newer > 0 {
+					warns = append(warns, fmt.Sprintf("%s: DEPLOYED tag left the catalogue (%s); reader lagging fallback (§3a.9) offers %d releases created after it", t.Tag, why, newer))
+				} else {
+					problems = append(problems, fmt.Sprintf("rule1 %s: deployed tag not in the catalogue (%s) and the lagging fallback has no candidates", t.Tag, why))
+				}
+				continue
 			}
 			if deployed != "" && c.src.Less(stub(t.Tag), stub(deployed)) {
 				accepted = append(accepted, fmt.Sprintf("%s: history-keep (%s; older than the deployed %s; days=%d minCount=%d)", t.Tag, why, deployed, days, minCount))
