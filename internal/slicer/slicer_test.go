@@ -269,3 +269,20 @@ func TestAdmitAll(t *testing.T) {
 		t.Fatal("admit all")
 	}
 }
+
+func TestDropExpired(t *testing.T) {
+	now := t0.Add(30 * 24 * time.Hour)
+	fresh := rel("f", 0)
+	fresh.Created = metav1.NewTime(now.Add(-time.Hour))
+	cands := []v1alpha1.Release{rel("a", 1), rel("b", 2), rel("c", 3), fresh}
+	kept, dropped := DropExpired(10, cands, now, 7, 3)
+	if len(kept) != 1 || kept[0].Tag != "f" || len(dropped) != 3 {
+		t.Fatalf("kept %v dropped %v", kept, dropped)
+	}
+	// catalogue is short: keep the newest expired ones up to minCount.
+	kept, _ = DropExpired(0, cands, now, 7, 3)
+	eq(t, []string{kept[0].Tag, kept[1].Tag, kept[2].Tag}, "b", "c", "f")
+	if k, d := DropExpired(0, cands, now, 0, 3); len(k) != 4 || d != nil {
+		t.Fatal("days=0 keeps all")
+	}
+}

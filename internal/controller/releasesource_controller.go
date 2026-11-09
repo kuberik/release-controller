@@ -204,10 +204,10 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		log.Info("discover failed", "error", derr.Error())
 		return r.unreachable(ctx, &rs, st, now, interval, len(existing) > 0, derr)
 	}
-	meta.SetStatusCondition(&st.Conditions, metav1.Condition{Type: kuberikcomv1alpha1.SourceReachableCondition, Status: metav1.ConditionTrue, Reason: "Reachable", Message: "source listed", ObservedGeneration: rs.Generation})
+	meta.SetStatusCondition(&st.Conditions, metav1.Condition{LastTransitionTime: metav1.NewTime(r.now()), Type: kuberikcomv1alpha1.SourceReachableCondition, Status: metav1.ConditionTrue, Reason: "Reachable", Message: "source listed", ObservedGeneration: rs.Generation})
 
 	if dres.NotModified && unresolved == 0 {
-		meta.SetStatusCondition(&st.Conditions, metav1.Condition{Type: kuberikcomv1alpha1.SyncingCondition, Status: metav1.ConditionFalse, Reason: "Idle", Message: "nothing to resolve", ObservedGeneration: rs.Generation})
+		meta.SetStatusCondition(&st.Conditions, metav1.Condition{LastTransitionTime: metav1.NewTime(r.now()), Type: kuberikcomv1alpha1.SyncingCondition, Status: metav1.ConditionFalse, Reason: "Idle", Message: "nothing to resolve", ObservedGeneration: rs.Generation})
 		r.setReady(st, rs.Generation, true, "Synced", "catalogue is current")
 		if st.LastSyncTime == nil || now.Sub(st.LastSyncTime.Time) >= lastSyncWriteEvery {
 			st.LastSyncTime = &metav1.Time{Time: now}
@@ -313,6 +313,11 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		admitAll = a.AdmitAll()
 	}
 	admitted, rejected := slicer.Admit(catalogue, candidates, src.Less, admitAll)
+	// Expired tags that retention already dropped (or would drop at once) are
+	// still listed by the source; admitting them would make retention and
+	// admission fight forever. Keep them out unless minCount needs them.
+	admitted, expired := slicer.DropExpired(len(catalogue), admitted, now, retDays, int(minCount))
+	rejected = append(rejected, expired...)
 	for _, rej := range rejected {
 		r.markSkipped(&rs, rej.Tag)
 	}
@@ -372,9 +377,9 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		st.Cursor = dres.Cursor
 	}
 	if leftover > 0 {
-		meta.SetStatusCondition(&st.Conditions, metav1.Condition{Type: kuberikcomv1alpha1.SyncingCondition, Status: metav1.ConditionTrue, Reason: "ResolveBudget", Message: fmt.Sprintf("%d tags left to resolve", leftover), ObservedGeneration: rs.Generation})
+		meta.SetStatusCondition(&st.Conditions, metav1.Condition{LastTransitionTime: metav1.NewTime(r.now()), Type: kuberikcomv1alpha1.SyncingCondition, Status: metav1.ConditionTrue, Reason: "ResolveBudget", Message: fmt.Sprintf("%d tags left to resolve", leftover), ObservedGeneration: rs.Generation})
 	} else {
-		meta.SetStatusCondition(&st.Conditions, metav1.Condition{Type: kuberikcomv1alpha1.SyncingCondition, Status: metav1.ConditionFalse, Reason: "Idle", Message: "nothing to resolve", ObservedGeneration: rs.Generation})
+		meta.SetStatusCondition(&st.Conditions, metav1.Condition{LastTransitionTime: metav1.NewTime(r.now()), Type: kuberikcomv1alpha1.SyncingCondition, Status: metav1.ConditionFalse, Reason: "Idle", Message: "nothing to resolve", ObservedGeneration: rs.Generation})
 	}
 	r.setReady(st, rs.Generation, true, "Synced", "catalogue is current")
 	if !plan.Empty() || st.LastSyncTime == nil || now.Sub(st.LastSyncTime.Time) >= lastSyncWriteEvery {
@@ -476,7 +481,7 @@ func (r *ReleaseSourceReconciler) setReady(st *kuberikcomv1alpha1.ReleaseSourceS
 	if !ok {
 		status = metav1.ConditionFalse
 	}
-	meta.SetStatusCondition(&st.Conditions, metav1.Condition{Type: kuberikcomv1alpha1.ReadyCondition, Status: status, Reason: reason, Message: msg, ObservedGeneration: gen})
+	meta.SetStatusCondition(&st.Conditions, metav1.Condition{LastTransitionTime: metav1.NewTime(r.now()), Type: kuberikcomv1alpha1.ReadyCondition, Status: status, Reason: reason, Message: msg, ObservedGeneration: gen})
 }
 
 // finish writes status only if it changed and schedules the next sync.
@@ -506,7 +511,7 @@ func (r *ReleaseSourceReconciler) fail(ctx context.Context, rs *kuberikcomv1alph
 // 3 x interval after the first failure, then goes False. The failure start is
 // the SourceReachable condition's transition time, which is write-free.
 func (r *ReleaseSourceReconciler) unreachable(ctx context.Context, rs *kuberikcomv1alpha1.ReleaseSource, st *kuberikcomv1alpha1.ReleaseSourceStatus, now time.Time, interval time.Duration, haveCatalogue bool, derr error) (ctrl.Result, error) {
-	meta.SetStatusCondition(&st.Conditions, metav1.Condition{Type: kuberikcomv1alpha1.SourceReachableCondition, Status: metav1.ConditionFalse, Reason: "Unreachable", Message: derr.Error(), ObservedGeneration: rs.Generation})
+	meta.SetStatusCondition(&st.Conditions, metav1.Condition{LastTransitionTime: metav1.NewTime(r.now()), Type: kuberikcomv1alpha1.SourceReachableCondition, Status: metav1.ConditionFalse, Reason: "Unreachable", Message: derr.Error(), ObservedGeneration: rs.Generation})
 	c := meta.FindStatusCondition(st.Conditions, kuberikcomv1alpha1.SourceReachableCondition)
 	since := c.LastTransitionTime.Time
 	if haveCatalogue && now.Sub(since) < 3*interval {

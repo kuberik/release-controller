@@ -365,3 +365,40 @@ func Admit(catalogue, candidates []v1alpha1.Release, less func(a, b v1alpha1.Rel
 	}
 	return admitted, rejected
 }
+
+// DropExpired removes candidates that are already expired by age (created
+// before now - days) so retention and admission do not fight over a tag the
+// source still lists. The newest expired candidates are kept only as far as
+// needed to bring the catalogue (count releases already) up to minCount.
+// days == 0 disables the filter. The result keeps (created, tag) order.
+func DropExpired(count int, candidates []v1alpha1.Release, now time.Time, days int32, minCount int) (kept, dropped []v1alpha1.Release) {
+	if days <= 0 {
+		return candidates, nil
+	}
+	cutoff := now.Add(-time.Duration(days) * 24 * time.Hour)
+	fresh := 0
+	for _, c := range candidates {
+		if !c.Created.Time.Before(cutoff) {
+			fresh++
+		}
+	}
+	need := minCount - count - fresh // expired candidates still wanted, newest first
+	keep := map[string]bool{}
+	for i := len(candidates) - 1; i >= 0; i-- {
+		c := candidates[i]
+		if !c.Created.Time.Before(cutoff) {
+			keep[c.Tag] = true
+		} else if need > 0 {
+			keep[c.Tag] = true
+			need--
+		}
+	}
+	for _, c := range candidates {
+		if keep[c.Tag] {
+			kept = append(kept, c)
+		} else {
+			dropped = append(dropped, c)
+		}
+	}
+	return kept, dropped
+}
