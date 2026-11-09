@@ -731,7 +731,7 @@ var _ = Describe("ReleaseSource Controller (fake source)", func() {
 		for i := 0; i < 20; i++ {
 			before = fake.resolves
 			sync()
-			Expect(fake.resolves-before).To(BeNumerically("<=", 1))
+			Expect(fake.resolves - before).To(BeNumerically("<=", 1))
 			clock = clock.Add(time.Minute)
 		}
 		Expect(getRS().Status.Count).To(Equal(int32(12)))
