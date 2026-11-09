@@ -321,8 +321,14 @@ func build(b *baseline, r *rollout, now time.Time, c *built) {
 	scfg := slicer.Config{Namespace: ns, Source: "parity", Now: now, RetentionDays: days, MinCount: int(minCount), MaxPerSlice: 100, MaxBytes: 256 * 1024}
 	var slices []v1alpha1.ReleaseSlice
 	st := catalogue.State{}
+	var walk catalogue.WalkMemory // the reconciler's walk memory, so resolves reflect controller cost
 	for c.syncs = 0; c.syncs < 500; c.syncs++ {
-		ar := catalogue.Admit(st, res.Refs, catalogue.Config{Less: c.src.Less, Resolve: resolve, Budget: 50, Days: days, MinCount: int(minCount), Now: now})
+		minTag := ""
+		if len(st.Catalogue) > 0 {
+			minTag = st.Catalogue[0].Tag
+		}
+		hint := walk.After(minTag)
+		ar := catalogue.Admit(st, res.Refs, catalogue.Config{Less: c.src.Less, Resolve: resolve, Budget: 50, Days: days, MinCount: int(minCount), Now: now, WalkAfter: hint})
 		c.resolves += ar.Resolves
 		for _, a := range ar.Admitted {
 			c.ever[a.Tag] = a
@@ -330,6 +336,11 @@ func build(b *baseline, r *rollout, now time.Time, c *built) {
 		plan := slicer.Compute(slicer.Input{Existing: slices, New: ar.Admitted}, scfg)
 		slices, scfg.NextIndex = plan.Final, plan.NextIndex
 		st = catalogue.State{Catalogue: slicer.Merge(slices), BackfillComplete: ar.BackfillComplete}
+		newMin := ""
+		if len(st.Catalogue) > 0 {
+			newMin = st.Catalogue[0].Tag
+		}
+		walk = walk.Next(hint, ar, newMin)
 		if ar.Leftover == 0 && ar.BackfillComplete {
 			c.syncs++
 			break
@@ -390,6 +401,29 @@ func check(id string, r *rollout, c *built, b *baseline, now time.Time) string {
 			}
 		}
 	}
+	// deployedLeft judges the deployed tag missing from the catalogue (§3a.9:
+	// rollout-controller falls back to catalogue releases created after the
+	// deployed history entry; acceptable only when that yields candidates).
+	// It runs before the retag branch: a retagged deployed tag is still the
+	// tag the reader must be able to move on from.
+	deployedLeft := func(tag, why string) {
+		var dc *time.Time
+		if hc := r.Status.History[0].Version.Created; hc != nil {
+			tt := hc.Time
+			dc = &tt
+		}
+		newer := 0
+		for _, cr := range cat {
+			if dc != nil && !cr.CreatedObserved && cr.Created.Time.After(*dc) {
+				newer++
+			}
+		}
+		if newer > 0 {
+			warns = append(warns, fmt.Sprintf("%s: DEPLOYED tag left the catalogue (%s); reader lagging fallback (§3a.9) offers %d releases created after it", tag, why, newer))
+		} else {
+			problems = append(problems, fmt.Sprintf("rule1 %s: deployed tag not in the catalogue (%s) and the lagging fallback has no candidates", tag, why))
+		}
+	}
 	// rule 1, 2, 3
 	for _, t := range r.Status.Available {
 		p, inCat := pos[t.Tag]
@@ -398,6 +432,15 @@ func check(id string, r *rollout, c *built, b *baseline, now time.Time) string {
 		switch {
 		case !c.listed[t.Tag]:
 			accepted = append(accepted, fmt.Sprintf("%s: gone from registry or excluded by filter (today keeps deleted tags; unreproducible)", t.Tag))
+			continue
+		case !inCat && deployed != "" && t.Tag == deployed:
+			why := "dropped by whole-slice retention"
+			if !wasAdmitted && resolved {
+				why = "excluded by the created rule"
+			} else if !wasAdmitted {
+				why = "not reached: older than the retention window"
+			}
+			deployedLeft(t.Tag, why)
 			continue
 		case !inCat && !wasAdmitted && resolved && retagged(t, raw):
 			warns = append(warns, fmt.Sprintf("%s: RETAGGED since observed (today created %s, registry now %s, rev %s -> %s); the created rule then disagrees with the policy order so backfill excludes it", t.Tag, t.Created.Format(time.RFC3339), raw.Created.Format(time.RFC3339), str(t.Revision), str(raw.Revision)))
@@ -408,28 +451,6 @@ func check(id string, r *rollout, c *built, b *baseline, now time.Time) string {
 				why = "excluded by the created rule"
 			} else if !wasAdmitted {
 				why = "not reached: older than the retention window"
-			}
-			if deployed != "" && t.Tag == deployed {
-				// §3a.9: rollout-controller falls back to catalogue releases
-				// created after the deployed history entry. Only acceptable
-				// when that fallback actually yields candidates.
-				var dc *time.Time
-				if hc := r.Status.History[0].Version.Created; hc != nil {
-					tt := hc.Time
-					dc = &tt
-				}
-				newer := 0
-				for _, cr := range cat {
-					if dc != nil && cr.Created.Time.After(*dc) {
-						newer++
-					}
-				}
-				if newer > 0 {
-					warns = append(warns, fmt.Sprintf("%s: DEPLOYED tag left the catalogue (%s); reader lagging fallback (§3a.9) offers %d releases created after it", t.Tag, why, newer))
-				} else {
-					problems = append(problems, fmt.Sprintf("rule1 %s: deployed tag not in the catalogue (%s) and the lagging fallback has no candidates", t.Tag, why))
-				}
-				continue
 			}
 			if deployed != "" && c.src.Less(stub(t.Tag), stub(deployed)) {
 				accepted = append(accepted, fmt.Sprintf("%s: history-keep (%s; older than the deployed %s; days=%d minCount=%d)", t.Tag, why, deployed, days, minCount))
