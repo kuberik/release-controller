@@ -75,6 +75,7 @@ type Retention struct {
 
 // OCISource configures an OCI repository source.
 // +kubebuilder:validation:XValidation:rule="has(self.image) != has(self.imagePolicyRef)",message="exactly one of image or imagePolicyRef must be set"
+// +kubebuilder:validation:XValidation:rule="!has(self.image) || has(self.policy)",message="policy is required when image is set"
 type OCISource struct {
 	// Image is the repository, e.g. ghcr.io/org/app.
 	// +kubebuilder:validation:MaxLength=512
@@ -89,7 +90,9 @@ type OCISource struct {
 	// FilterTags has the Flux ImagePolicy shape.
 	// +optional
 	FilterTags *TagFilter `json:"filterTags,omitempty"`
-	// Policy has the Flux ImagePolicy shape.
+	// Policy has the Flux ImagePolicy shape. Required with image: release
+	// order and admission are defined by it (with imagePolicyRef the
+	// ImagePolicy carries it).
 	// +optional
 	Policy *OrderPolicy `json:"policy,omitempty"`
 	// ImagePolicyRef reads image, secretRef, filterTags and policy from an
@@ -177,10 +180,19 @@ type ReleaseSourceStatus struct {
 	// Count of releases in the catalogue.
 	// +optional
 	Count int32 `json:"count,omitempty"`
-	// Slices oldest to newest; the last is open. Convenience only: readers select by label.
-	// +kubebuilder:validation:MaxItems=64
+	// SliceCount is the number of ReleaseSlices of this source. Slice names
+	// are not listed (an unbounded catalogue would overflow any list bound);
+	// readers select slices by the kuberik.com/release-source label.
 	// +optional
-	Slices []string `json:"slices,omitempty"`
+	SliceCount int32 `json:"sliceCount,omitempty"`
+	// OpenSlice is the name of the slice taking new releases ("" if none).
+	// +optional
+	OpenSlice string `json:"openSlice,omitempty"`
+	// BackfillComplete is true once the catalogue reaches back to the
+	// retention window (or the registry has no older tags). While false the
+	// controller keeps walking older tags in policy-descending order.
+	// +optional
+	BackfillComplete bool `json:"backfillComplete,omitempty"`
 	// +optional
 	NextSliceIndex int32 `json:"nextSliceIndex,omitempty"`
 	// Artifact metadata of the newest release.

@@ -1,19 +1,22 @@
 // Package slicer computes ReleaseSlice writes. It is pure: no client, no
-// clock, no I/O. Input is the slices that exist plus what the sync found;
-// output is the minimal set of creates, updates and deletes (design §3).
+// clock, no I/O. Input is the slices that exist plus what the sync admitted;
+// output is the minimal set of creates, updates and deletes (design §3, §3a).
 //
 // Rules in one place:
-//   - releases keep the slice they are in; new ones are appended to the open
-//     slice (the one with sealed=false) and every slice is sorted by
-//     (created, tag);
+//   - the catalogue is ordered by Sequence (admission order = policy order),
+//     never by created; every slice is sorted by sequence;
+//   - releases never move between slices; new releases (given in admission
+//     order: incremental ascending, then backfill descending) fill the open
+//     slice (sealed=false) and the overflow goes into new slices named
+//     <source>-<5-digit index>;
 //   - a slice is sealed in the same write that fills it, at MaxPerSlice
-//     releases or when its encoded size reaches MaxBytes; overflow goes into a
-//     new slice named <source>-<5-digit index>;
-//   - repairs replace an unresolved release in place, even in a sealed slice
-//     (the only write a sealed slice takes);
-//   - retention deletes the oldest sealed slices while every release in them
-//     is expired and the remaining count stays >= MinCount; the open slice is
-//     never deleted;
+//     releases or when its encoded size reaches MaxBytes;
+//   - repairs replace an unresolved release in place, even in a sealed slice;
+//     a repair that would push the slice over HardMaxBytes (1 MiB) instead
+//     marks the release rejected, without growing the slice;
+//   - retention deletes the oldest sealed slices (by min sequence) while every
+//     release in them is expired and the remaining count stays >= MinCount;
+//     the open slice is never deleted;
 //   - a tag present in several slices keeps the older slice's copy.
 package slicer
 
@@ -51,15 +54,28 @@ type Config struct {
 	MaxPerSlice int
 	// MaxBytes seals once the encoded slice object reaches this size; 0 disables.
 	MaxBytes int64
+	// HardMaxBytes is the encoded size a repair may never exceed (default 1 MiB,
+	// well under etcd's 1.5 MiB request limit).
+	HardMaxBytes int64
 }
+
+// DefaultHardMaxBytes is the repair size limit.
+const DefaultHardMaxBytes int64 = 1 << 20
+
+// RejectedKey is the Release.Metadata key that marks a permanent rejection
+// (the reason is the value). A rejected release is stored once with
+// metadataUnresolved=true and never retried.
+const RejectedKey = "kuberik.com/rejected"
 
 // Input is what the sync found.
 type Input struct {
 	Existing []v1alpha1.ReleaseSlice
-	// New are admitted releases not in the catalogue. Tags already present are ignored.
+	// New are admitted releases not in the catalogue, with Sequence set, in
+	// admission order. Tags already present are ignored.
 	New []v1alpha1.Release
 	// Repairs are resolved releases for catalogue entries that were unresolved.
-	// FirstSeen of the stored entry is kept.
+	// Sequence and FirstSeen of the stored entry are kept. A repair carrying
+	// RejectedKey in Metadata marks the entry rejected.
 	Repairs []v1alpha1.Release
 }
 
@@ -71,6 +87,9 @@ type Plan struct {
 	// Final is the state after the plan, oldest to newest, deleted slices excluded.
 	Final     []v1alpha1.ReleaseSlice
 	NextIndex int32
+	// RepairsRejected are tags whose repair was turned into a rejection
+	// because it would have grown a slice over HardMaxBytes.
+	RepairsRejected []string
 }
 
 // Empty reports whether the plan writes nothing.
@@ -78,16 +97,16 @@ func (p Plan) Empty() bool {
 	return len(p.Creates) == 0 && len(p.Updates) == 0 && len(p.Deletes) == 0
 }
 
-// Less orders releases by (created, tag).
+// Less orders releases by (sequence, tag).
 func Less(a, b v1alpha1.Release) bool {
-	if !a.Created.Equal(&b.Created) {
-		return a.Created.Before(&b.Created)
+	if a.Sequence != b.Sequence {
+		return a.Sequence < b.Sequence
 	}
 	return a.Tag < b.Tag
 }
 
 // Merge returns the catalogue of a set of slices: every release once, sorted
-// by (created, tag). If a tag appears in several slices the copy in the older
+// by (sequence, tag). If a tag appears in several slices the copy in the older
 // slice (lower name, since names are zero-padded indices) wins. Readers
 // (rollout-controller) use exactly this.
 func Merge(slices []v1alpha1.ReleaseSlice) []v1alpha1.Release {
@@ -154,9 +173,29 @@ func setBounds(s *v1alpha1.ReleaseSlice) {
 		s.OldestCreated, s.NewestCreated = nil, nil
 		return
 	}
-	o := s.Releases[0].Created
-	n := s.Releases[len(s.Releases)-1].Created
+	o, n := s.Releases[0].Created, s.Releases[0].Created
+	for _, r := range s.Releases[1:] {
+		if r.Created.Before(&o) {
+			o = r.Created
+		}
+		if n.Before(&r.Created) {
+			n = r.Created
+		}
+	}
 	s.OldestCreated, s.NewestCreated = &o, &n
+}
+
+func minSeq(s v1alpha1.ReleaseSlice) int64 {
+	if len(s.Releases) == 0 {
+		return 0
+	}
+	m := s.Releases[0].Sequence
+	for _, r := range s.Releases[1:] {
+		if r.Sequence < m {
+			m = r.Sequence
+		}
+	}
+	return m
 }
 
 // Compute returns the minimal plan for the input.
@@ -191,7 +230,13 @@ func Compute(in Input, cfg Config) Plan {
 		}
 	}
 
-	// Repairs, in place.
+	if cfg.HardMaxBytes <= 0 {
+		cfg.HardMaxBytes = DefaultHardMaxBytes
+	}
+	var repairRejected []string
+
+	// Repairs, in place. Sequence and FirstSeen stay; the slice may not grow
+	// over the hard limit: then the release is marked rejected instead.
 	for _, rep := range in.Repairs {
 		i, ok := owner[rep.Tag]
 		if !ok {
@@ -203,9 +248,19 @@ func Compute(in Input, cfg Config) Plan {
 			if old.Tag != rep.Tag {
 				continue
 			}
-			rep.FirstSeen = old.FirstSeen
+			rep.FirstSeen, rep.Sequence = old.FirstSeen, old.Sequence
 			if rep.Created.IsZero() {
 				rep.Created, rep.CreatedObserved = old.Created, old.CreatedObserved
+			}
+			grown := slices[i]
+			grown.Releases = append([]v1alpha1.Release(nil), slices[i].Releases...)
+			grown.Releases[j] = rep
+			if _, rejected := rep.Metadata[RejectedKey]; !rejected && int64(EncodedSize(&grown)) > cfg.HardMaxBytes {
+				rj := old
+				rj.MetadataUnresolved = true
+				rj.Metadata = map[string]string{RejectedKey: "resolved metadata would grow the slice over the size limit"}
+				rep = rj
+				repairRejected = append(repairRejected, rep.Tag)
 			}
 			slices[i].Releases[j] = rep
 		}
@@ -213,7 +268,7 @@ func Compute(in Input, cfg Config) Plan {
 		setBounds(&slices[i])
 	}
 
-	// Append.
+	// Append in admission order: the open slice first, then new slices.
 	var fresh []v1alpha1.Release
 	seenNew := map[string]struct{}{}
 	for _, r := range in.New {
@@ -234,13 +289,6 @@ func Compute(in Input, cfg Config) Plan {
 				open = i
 			}
 		}
-		var pool []v1alpha1.Release
-		if open >= 0 {
-			pool = append(pool, slices[open].Releases...)
-		}
-		pool = append(pool, fresh...)
-		sortReleases(pool)
-
 		newSlice := func() v1alpha1.ReleaseSlice {
 			name := SliceName(cfg.Source, next)
 			next++
@@ -256,36 +304,44 @@ func Compute(in Input, cfg Config) Plan {
 				Source: cfg.Source,
 			}
 		}
-		for len(pool) > 0 {
-			var t v1alpha1.ReleaseSlice
-			idx := open
-			if open >= 0 {
-				t = slices[open]
-				open = -1 // later overflow goes to new slices
-			} else {
-				t = newSlice()
-				slices = append(slices, t)
-				idx = len(slices) - 1
+		full := func(t *v1alpha1.ReleaseSlice, size int64) bool {
+			return len(t.Releases) >= cfg.MaxPerSlice || (cfg.MaxBytes > 0 && size >= cfg.MaxBytes)
+		}
+		touched := map[int]bool{}
+		cur := open // index into slices of the slice taking releases; -1 none
+		var size int64
+		if cur >= 0 {
+			size = int64(EncodedSize(&slices[cur]))
+			if full(&slices[cur], size) {
+				slices[cur].Sealed = true
+				cur = -1
 			}
-			t.Releases = nil
-			size := int64(EncodedSize(&t))
-			for len(pool) > 0 {
-				r := pool[0]
-				pool = pool[1:]
-				t.Releases = append(t.Releases, r)
-				b, _ := json.Marshal(r)
-				size += int64(len(b)) + 1
-				if len(t.Releases) >= cfg.MaxPerSlice || (cfg.MaxBytes > 0 && size >= cfg.MaxBytes) {
-					t.Sealed = true
-					break
-				}
+		}
+		for _, r := range fresh {
+			if cur < 0 {
+				slices = append(slices, newSlice())
+				cur = len(slices) - 1
+				size = int64(EncodedSize(&slices[cur]))
 			}
-			setBounds(&t)
-			slices[idx] = t
+			touched[cur] = true
+			t := &slices[cur]
+			t.Releases = append(t.Releases, r)
+			b, _ := json.Marshal(r)
+			size += int64(len(b)) + 1
+			if full(t, size) {
+				t.Sealed = true
+				cur = -1
+			}
+		}
+		for i := range slices {
+			if touched[i] {
+				sortReleases(slices[i].Releases)
+				setBounds(&slices[i])
+			}
 		}
 	}
 
-	// Retention: oldest sealed slices only.
+	// Retention: oldest sealed slices only (oldest = lowest min sequence).
 	total := 0
 	for _, s := range slices {
 		total += len(s.Releases)
@@ -293,8 +349,14 @@ func Compute(in Input, cfg Config) Plan {
 	deleted := map[string]bool{}
 	if cfg.RetentionDays > 0 {
 		cutoff := cfg.Now.Add(-time.Duration(cfg.RetentionDays) * 24 * time.Hour)
-		for _, s := range slices {
-			if !s.Sealed || total-len(s.Releases) < cfg.MinCount {
+		bySeq := make([]v1alpha1.ReleaseSlice, len(slices))
+		copy(bySeq, slices)
+		sort.SliceStable(bySeq, func(i, j int) bool { return minSeq(bySeq[i]) < minSeq(bySeq[j]) })
+		for _, s := range bySeq {
+			if !s.Sealed {
+				continue // the open slice is never deleted, and may hold the lowest sequences
+			}
+			if total-len(s.Releases) < cfg.MinCount {
 				break
 			}
 			expired := true
@@ -316,7 +378,7 @@ func Compute(in Input, cfg Config) Plan {
 	for _, s := range orig {
 		origByName[s.Name] = s
 	}
-	plan := Plan{NextIndex: next}
+	plan := Plan{NextIndex: next, RepairsRejected: repairRejected}
 	for _, s := range slices {
 		switch {
 		case deleted[s.Name]:
@@ -334,71 +396,4 @@ func Compute(in Input, cfg Config) Plan {
 		plan.Final = append(plan.Final, s)
 	}
 	return plan
-}
-
-// Admit applies monotonic admission. Candidates (resolved, created/firstSeen
-// filled) are taken in (created, tag) order and admitted only if the running
-// maximum under less (seeded with the catalogue's maximum) is less than them;
-// each admitted candidate becomes the new maximum. With an empty catalogue
-// this is the from-scratch running-maximum rule. admitAll bypasses the rule
-// (a source with no policy).
-func Admit(catalogue, candidates []v1alpha1.Release, less func(a, b v1alpha1.Release) bool, admitAll bool) (admitted, rejected []v1alpha1.Release) {
-	sorted := append([]v1alpha1.Release(nil), candidates...)
-	sortReleases(sorted)
-	if admitAll || less == nil {
-		return sorted, nil
-	}
-	var max *v1alpha1.Release
-	for i := range catalogue {
-		if max == nil || less(*max, catalogue[i]) {
-			max = &catalogue[i]
-		}
-	}
-	for _, c := range sorted {
-		if max != nil && !less(*max, c) {
-			rejected = append(rejected, c)
-			continue
-		}
-		admitted = append(admitted, c)
-		c := c
-		max = &c
-	}
-	return admitted, rejected
-}
-
-// DropExpired removes candidates that are already expired by age (created
-// before now - days) so retention and admission do not fight over a tag the
-// source still lists. The newest expired candidates are kept only as far as
-// needed to bring the catalogue (count releases already) up to minCount.
-// days == 0 disables the filter. The result keeps (created, tag) order.
-func DropExpired(count int, candidates []v1alpha1.Release, now time.Time, days int32, minCount int) (kept, dropped []v1alpha1.Release) {
-	if days <= 0 {
-		return candidates, nil
-	}
-	cutoff := now.Add(-time.Duration(days) * 24 * time.Hour)
-	fresh := 0
-	for _, c := range candidates {
-		if !c.Created.Time.Before(cutoff) {
-			fresh++
-		}
-	}
-	need := minCount - count - fresh // expired candidates still wanted, newest first
-	keep := map[string]bool{}
-	for i := len(candidates) - 1; i >= 0; i-- {
-		c := candidates[i]
-		if !c.Created.Time.Before(cutoff) {
-			keep[c.Tag] = true
-		} else if need > 0 {
-			keep[c.Tag] = true
-			need--
-		}
-	}
-	for _, c := range candidates {
-		if keep[c.Tag] {
-			kept = append(kept, c)
-		} else {
-			dropped = append(dropped, c)
-		}
-	}
-	return kept, dropped
 }

@@ -83,6 +83,9 @@ func image(manifestAnn, configAnn map[string]string, extra m) m {
 
 func newSrc(t *testing.T, r *reg, repo string, f *v1alpha1.TagFilter, p *v1alpha1.OrderPolicy) *Source {
 	t.Helper()
+	if p == nil { // a policy is required; most tests only care about listing and resolving
+		p = &v1alpha1.OrderPolicy{Alphabetical: &v1alpha1.AlphabeticalPolicy{}}
+	}
 	s, err := New(Config{Image: r.host + "/" + repo, Insecure: true, FilterTags: f, Policy: p})
 	if err != nil {
 		t.Fatal(err)
@@ -127,8 +130,8 @@ func TestDiscoverFilterAndExtract(t *testing.T) {
 	if !s.Less(a, b) || s.Less(b, a) {
 		t.Fatal("extracted ordering wrong")
 	}
-	if s.AdmitAll() {
-		t.Fatal("policy set, AdmitAll must be false")
+	if s.Identity() != r.host+"/app" {
+		t.Fatalf("identity %q", s.Identity())
 	}
 }
 
@@ -158,7 +161,8 @@ func TestDiscoverPaginates(t *testing.T) {
 		json.NewEncoder(w).Encode(m{"name": "app", "tags": page})
 	}))
 	defer srv.Close()
-	s, _ := New(Config{Image: strings.TrimPrefix(srv.URL, "http://") + "/app", Insecure: true})
+	s, _ := New(Config{Image: strings.TrimPrefix(srv.URL, "http://") + "/app", Insecure: true,
+		Policy: &v1alpha1.OrderPolicy{Alphabetical: &v1alpha1.AlphabeticalPolicy{}}})
 	res, err := s.Discover(context.Background(), "")
 	if err != nil || len(res.Refs) != 25 {
 		t.Fatalf("err=%v n=%d", err, len(res.Refs))
@@ -166,8 +170,8 @@ func TestDiscoverPaginates(t *testing.T) {
 	if pages != 3 {
 		t.Fatalf("expected 3 tag-list pages, got %d", pages)
 	}
-	if !s.AdmitAll() {
-		t.Fatal("no policy => AdmitAll")
+	if _, err := New(Config{Image: "x/y"}); err == nil {
+		t.Fatal("a policy is required")
 	}
 }
 
@@ -232,13 +236,6 @@ func TestPolicyLess(t *testing.T) {
 		Policy:     &v1alpha1.OrderPolicy{Numerical: &v1alpha1.NumericalPolicy{Order: "asc"}}})
 	if !s.Less(rel("rel-9"), rel("rel-10")) {
 		t.Fatal("numerical on extracted value")
-	}
-	// no policy: by created then tag
-	s, _ = New(Config{Image: "x/y"})
-	now := metav1.Now()
-	earlier := metav1.NewTime(now.Add(-time.Hour))
-	if !s.Less(source.Release{Tag: "z", Created: earlier}, source.Release{Tag: "a", Created: now}) {
-		t.Fatal("no policy: by created")
 	}
 	if _, err := New(Config{Image: "x/y", Policy: &v1alpha1.OrderPolicy{SemVer: &v1alpha1.SemVerPolicy{Range: "not a range"}}}); err == nil {
 		t.Fatal("bad range must error")
@@ -354,7 +351,7 @@ func TestResolveUnreadableIsUnresolved(t *testing.T) {
 		t.Fatalf("%+v", rel)
 	}
 	// unreachable registry
-	dead, _ := New(Config{Image: "127.0.0.1:1/app", Insecure: true})
+	dead, _ := New(Config{Image: "127.0.0.1:1/app", Insecure: true, Policy: &v1alpha1.OrderPolicy{Alphabetical: &v1alpha1.AlphabeticalPolicy{}}})
 	if rel := resolve(t, dead, "x"); !rel.MetadataUnresolved {
 		t.Fatal("unreachable must be unresolved")
 	}

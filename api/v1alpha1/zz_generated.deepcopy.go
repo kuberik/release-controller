@@ -371,11 +371,6 @@ func (in *ReleaseSourceStatus) DeepCopyInto(out *ReleaseSourceStatus) {
 		*out = new(ReleaseRef)
 		(*in).DeepCopyInto(*out)
 	}
-	if in.Slices != nil {
-		in, out := &in.Slices, &out.Slices
-		*out = make([]string, len(*in))
-		copy(*out, *in)
-	}
 	if in.Artifact != nil {
 		in, out := &in.Artifact, &out.Artifact
 		*out = new(ArtifactMetadata)

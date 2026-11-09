@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	kuberikcomv1alpha1 "github.com/kuberik/release-controller/api/v1alpha1"
+	cat "github.com/kuberik/release-controller/internal/catalogue"
 	"github.com/kuberik/release-controller/internal/slicer"
 	"github.com/kuberik/release-controller/internal/source"
 )
@@ -81,18 +82,30 @@ type ReleaseSourceReconciler struct {
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
 
-	// skipped remembers tags the reconciler decided not to admit (not
-	// monotonic, or past the first-sync cutoff) so they are not re-resolved on
-	// every sync. Keyed by source UID and generation; memory only, a restart
-	// just resolves them once more.
-	skipMu  sync.Mutex
-	skipped map[skipKey]map[string]struct{}
+	// mem is per-source memory that only saves work and noise (retry
+	// backoff, the backfill walk position, the last TagsSkipped count). Losing
+	// it on restart costs a few requests or one repeated Event, never
+	// correctness: admission is decided from the catalogue and the listing.
+	memMu sync.Mutex
+	mem   map[types.UID]*sourceMem
 }
 
-type skipKey struct {
-	uid types.UID
-	gen int64
+type backoffEntry struct {
+	attempts int
+	next     time.Time
 }
+
+type sourceMem struct {
+	backoff     map[string]backoffEntry
+	walkMin     string // catalogue minimum tag the walk position belongs to
+	walkPos     string
+	lastSkipped int
+}
+
+const (
+	backoffInitial = 10 * time.Second
+	backoffMax     = time.Hour
+)
 
 // +kubebuilder:rbac:groups=kuberik.com,resources=releasesources,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=kuberik.com,resources=releasesources/status,verbs=get;update;patch
@@ -115,21 +128,73 @@ func (r *ReleaseSourceReconciler) event(obj runtime.Object, typ, reason, msg str
 	}
 }
 
-func identity(rs *kuberikcomv1alpha1.ReleaseSource) string {
-	if o := rs.Spec.OCI; o != nil {
-		if o.ImagePolicyRef != nil {
-			return "imagePolicyRef:" + o.ImagePolicyRef.Name
-		}
-		return "image:" + o.Image
+func (r *ReleaseSourceReconciler) memFor(uid types.UID) *sourceMem {
+	r.memMu.Lock()
+	defer r.memMu.Unlock()
+	if r.mem == nil {
+		r.mem = map[types.UID]*sourceMem{}
 	}
-	return ""
+	m := r.mem[uid]
+	if m == nil {
+		m = &sourceMem{backoff: map[string]backoffEntry{}}
+		r.mem[uid] = m
+	}
+	return m
+}
+
+func (r *ReleaseSourceReconciler) forgetMem(uid types.UID) {
+	r.memMu.Lock()
+	defer r.memMu.Unlock()
+	delete(r.mem, uid)
+}
+
+// failed registers a failed resolve of tag and returns when to retry:
+// exponential from 10 s, capped at 1 h.
+func (m *sourceMem) failed(tag string, now time.Time) time.Time {
+	e := m.backoff[tag]
+	e.attempts++
+	d := backoffInitial << (e.attempts - 1)
+	if d > backoffMax || d <= 0 {
+		d = backoffMax
+	}
+	e.next = now.Add(d)
+	m.backoff[tag] = e
+	return e.next
+}
+
+func (m *sourceMem) held(tag string, now time.Time) bool {
+	e, ok := m.backoff[tag]
+	return ok && now.Before(e.next)
+}
+
+// identity is what the catalogue was built from: the spec's image or
+// imagePolicyRef name and, for a reference, the repository the referenced
+// objects resolve to now (a changed ImageRepository image is a new catalogue).
+func identity(rs *kuberikcomv1alpha1.ReleaseSource, src source.Source) string {
+	o := rs.Spec.OCI
+	if o == nil {
+		return ""
+	}
+	if o.ImagePolicyRef != nil {
+		id := "imagePolicyRef:" + o.ImagePolicyRef.Name
+		if i, ok := src.(source.Identifier); ok && i.Identity() != "" {
+			id += "@" + i.Identity()
+		}
+		return id
+	}
+	return "image:" + o.Image
 }
 
 func jitter(d time.Duration) time.Duration {
 	return time.Duration(float64(d) * (0.9 + 0.2*rand.Float64()))
 }
 
-// Reconcile runs one sync of a ReleaseSource (design §3 "Sync").
+func rejectedTag(r kuberikcomv1alpha1.Release) bool {
+	_, ok := r.Metadata[slicer.RejectedKey]
+	return ok
+}
+
+// Reconcile runs one sync of a ReleaseSource (design §3, §3a).
 func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -143,6 +208,9 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	if !rs.DeletionTimestamp.IsZero() || rs.Spec.Suspend {
 		forgetMetrics(rs.Namespace, rs.Name)
+		if !rs.DeletionTimestamp.IsZero() {
+			r.forgetMem(rs.UID)
+		}
 		return ctrl.Result{}, nil
 	}
 	defer observeSync(&rs, time.Now())
@@ -156,29 +224,14 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	now := r.now()
 	st := rs.Status.DeepCopy()
 	st.ObservedGeneration = rs.Generation
+	mem := r.memFor(rs.UID)
 
 	existing, err := r.listSlices(ctx, &rs)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// Identity change: the catalogue belongs to a different source.
-	id := identity(&rs)
-	for _, s := range existing {
-		if old, ok := s.Annotations[IdentityAnnotation]; ok && old != id {
-			for i := range existing {
-				if err := r.Delete(ctx, &existing[i]); err != nil && !apierrors.IsNotFound(err) {
-					return ctrl.Result{}, err
-				}
-			}
-			r.event(&rs, "Normal", "IdentityChanged", fmt.Sprintf("source identity changed from %q to %q; catalogue rebuilt", old, id))
-			existing = nil
-			st.Cursor, st.Newest, st.Artifact, st.Count, st.Slices = "", nil, nil, 0, nil
-			r.forgetSkipped(rs.UID)
-			break
-		}
-	}
-
+	// The new configuration must build before anything is deleted.
 	factory := r.SourceFactory
 	if factory == nil {
 		var ferr error
@@ -196,36 +249,68 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return r.fail(ctx, &rs, st, now, interval, kuberikcomv1alpha1.ReadyCondition, "ConfigInvalid", err.Error())
 	}
 
-	catalogue := slicer.Merge(existing)
-	inCat := map[string]kuberikcomv1alpha1.Release{}
-	for _, c := range catalogue {
-		inCat[c.Tag] = c
+	// Identity change: the catalogue belongs to a different source. Validate
+	// the new one with a real listing first; a broken new config keeps the
+	// old catalogue serving.
+	id := identity(&rs, src)
+	var pre *source.DiscoverResult
+	for _, s := range existing {
+		old, ok := s.Annotations[IdentityAnnotation]
+		if !ok || old == id {
+			continue
+		}
+		dres, derr := src.Discover(ctx, "")
+		if derr != nil {
+			r.event(&rs, "Warning", "IdentityChangeBlocked", fmt.Sprintf("source identity changed from %q to %q but the new source cannot be listed, keeping the old catalogue: %v", old, id, derr))
+			return r.unreachable(ctx, &rs, st, now, interval, true, derr)
+		}
+		pre = &dres
+		for i := range existing {
+			if err := r.Delete(ctx, &existing[i]); err != nil && !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, err
+			}
+		}
+		r.event(&rs, "Normal", "IdentityChanged", fmt.Sprintf("source identity changed from %q to %q; catalogue rebuilt", old, id))
+		existing = nil
+		st.Cursor, st.Newest, st.Artifact, st.Count, st.SliceCount, st.OpenSlice, st.BackfillComplete = "", nil, nil, 0, 0, "", false
+		mem.backoff, mem.walkMin, mem.walkPos = map[string]backoffEntry{}, "", ""
+		break
 	}
-	unresolved := 0
+
+	catalogue := slicer.Merge(existing)
+	repairable := 0
 	for _, c := range catalogue {
-		if c.MetadataUnresolved {
-			unresolved++
+		if c.MetadataUnresolved && !rejectedTag(c) {
+			repairable++
 		}
 	}
 
-	// 1. Discover. While a resolve backlog exists, ignore the cursor.
-	cursor := st.Cursor
-	if meta.IsStatusConditionTrue(st.Conditions, kuberikcomv1alpha1.SyncingCondition) {
-		cursor = ""
-	}
-	dres, derr := src.Discover(ctx, cursor)
-	if derr != nil {
-		log.Info("discover failed", "error", derr.Error())
-		return r.unreachable(ctx, &rs, st, now, interval, len(existing) > 0, derr)
+	// 1. Discover. While work is pending, ignore the cursor.
+	var dres source.DiscoverResult
+	if pre != nil {
+		dres = *pre
+	} else {
+		cursor := st.Cursor
+		if meta.IsStatusConditionTrue(st.Conditions, kuberikcomv1alpha1.SyncingCondition) {
+			cursor = ""
+		}
+		var derr error
+		dres, derr = src.Discover(ctx, cursor)
+		if derr != nil {
+			log.Info("discover failed", "error", derr.Error())
+			return r.unreachable(ctx, &rs, st, now, interval, len(existing) > 0, derr)
+		}
 	}
 	if ts, ok := src.(source.TagSkipper); ok {
-		if n := ts.SkippedLongTags(); n > 0 {
+		n := ts.SkippedLongTags()
+		if n > 0 && n != mem.lastSkipped {
 			r.event(&rs, "Warning", "TagsSkipped", fmt.Sprintf("%d tags skipped: longer than 128 characters", n))
 		}
+		mem.lastSkipped = n
 	}
 	meta.SetStatusCondition(&st.Conditions, metav1.Condition{LastTransitionTime: metav1.NewTime(r.now()), Type: kuberikcomv1alpha1.SourceReachableCondition, Status: metav1.ConditionTrue, Reason: "Reachable", Message: "source listed", ObservedGeneration: rs.Generation})
 
-	if dres.NotModified && unresolved == 0 {
+	if dres.NotModified && repairable == 0 && st.BackfillComplete && len(catalogue) > 0 {
 		meta.SetStatusCondition(&st.Conditions, metav1.Condition{LastTransitionTime: metav1.NewTime(r.now()), Type: kuberikcomv1alpha1.SyncingCondition, Status: metav1.ConditionFalse, Reason: "Idle", Message: "nothing to resolve", ObservedGeneration: rs.Generation})
 		r.setReady(st, rs.Generation, true, "Synced", "catalogue is current")
 		if st.LastSyncTime == nil || now.Sub(st.LastSyncTime.Time) >= lastSyncWriteEvery {
@@ -234,122 +319,113 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return r.finish(ctx, &rs, st, interval, 0)
 	}
 
-	// 2. new = discovered - catalogue (+ unresolved).
-	skip := r.skippedFor(&rs)
-	var resolveSet []source.Ref
-	refByTag := map[string]source.Ref{}
-	for _, ref := range dres.Refs {
-		refByTag[ref.Tag] = ref
-		if _, ok := inCat[ref.Tag]; ok {
-			continue
-		}
-		if _, ok := skip[ref.Tag]; ok {
-			continue
-		}
-		resolveSet = append(resolveSet, ref)
-	}
-	repairTags := map[string]bool{}
-	for _, c := range catalogue {
-		if c.MetadataUnresolved {
-			repairTags[c.Tag] = true
-			ref, ok := refByTag[c.Tag]
-			if !ok {
-				ref = source.Ref{Tag: c.Tag}
-			}
-			resolveSet = append(resolveSet, ref)
-		}
-	}
-
-	// 3. Newest first by the source's order, bounded.
-	stub := func(ref source.Ref) kuberikcomv1alpha1.Release {
-		if ref.Partial != nil {
-			return *ref.Partial
-		}
-		return kuberikcomv1alpha1.Release{Tag: ref.Tag}
-	}
-	sort.SliceStable(resolveSet, func(i, j int) bool {
-		a, b := stub(resolveSet[i]), stub(resolveSet[j])
-		if src.Less(a, b) {
-			return false
-		}
-		if src.Less(b, a) {
-			return true
-		}
-		return a.Tag > b.Tag
-	})
 	budget := r.MaxResolvesPerSync
 	if budget <= 0 {
 		budget = defaultResolves
 	}
-	leftover := 0
-	if len(resolveSet) > budget {
-		leftover = len(resolveSet) - budget
-		resolveSet = resolveSet[:budget]
-	}
-
 	retDays, minCount := retention(&rs)
-	cutoff := now.Add(-time.Duration(retDays) * 24 * time.Hour)
-	var candidates, repairs []kuberikcomv1alpha1.Release
-	for i, ref := range resolveSet {
+	resolver := func(ref source.Ref) cat.Resolved {
 		rel, rerr := src.Resolve(ctx, ref)
-		if rerr != nil || rel.MetadataUnresolved {
-			resolveErrors.WithLabelValues(sourceKind(&rs), rs.Namespace, rs.Name).Inc()
-		}
 		if rerr != nil {
+			resolveErrors.WithLabelValues(sourceKind(&rs), rs.Namespace, rs.Name).Inc()
 			log.Info("resolve failed", "tag", ref.Tag, "error", rerr.Error())
-			r.event(&rs, "Warning", "MetadataRejected", fmt.Sprintf("%s: %v", ref.Tag, rerr))
-			continue
+			return cat.Resolved{Release: kuberikcomv1alpha1.Release{Tag: ref.Tag, MetadataUnresolved: true}, Rejected: rerr.Error()}
 		}
+		out := cat.Resolved{Release: rel}
 		if rej, ok := src.(source.Rejecter); ok {
 			if msg, rejected := rej.Rejection(ref.Tag); rejected {
-				r.event(&rs, "Warning", "MetadataRejected", msg)
+				out.Rejected = msg
 			}
 		}
-		if rel.Tag == "" {
-			rel.Tag = ref.Tag
+		if rel.MetadataUnresolved {
+			resolveErrors.WithLabelValues(sourceKind(&rs), rs.Namespace, rs.Name).Inc()
 		}
-		if repairTags[ref.Tag] {
-			if !rel.MetadataUnresolved {
-				repairs = append(repairs, rel)
-			}
+		return out
+	}
+
+	// 2. Repairs: unresolved catalogue entries, per-tag backoff, at most a
+	// quarter of the budget so they cannot starve admission.
+	refByTag := map[string]source.Ref{}
+	for _, ref := range dres.Refs {
+		refByTag[ref.Tag] = ref
+	}
+	var repairs []kuberikcomv1alpha1.Release
+	repairBudget := budget / 4
+	if repairBudget < 1 {
+		repairBudget = 1
+	}
+	used, repairLeft := 0, 0
+	for i := len(catalogue) - 1; i >= 0; i-- { // newest first
+		c := catalogue[i]
+		if !c.MetadataUnresolved || rejectedTag(c) {
 			continue
 		}
-		if rel.FirstSeen.IsZero() {
-			rel.FirstSeen = metav1.NewTime(now)
+		if mem.held(c.Tag, now) {
+			continue
 		}
-		if rel.Created.IsZero() {
-			rel.Created, rel.CreatedObserved = rel.FirstSeen, true
+		if used >= repairBudget {
+			repairLeft++
+			continue
 		}
-		candidates = append(candidates, rel)
-		// First sync of a big repo: once minCount releases are in hand and
-		// this one is already past retention, the rest would be dropped anyway.
-		if len(existing) == 0 && retDays > 0 && len(candidates) >= int(minCount) && rel.Created.Time.Before(cutoff) {
-			for _, rest := range resolveSet[i+1:] {
-				if !repairTags[rest.Tag] {
-					r.markSkipped(&rs, rest.Tag)
-				}
-			}
-			leftover = 0
-			break
+		ref, ok := refByTag[c.Tag]
+		if !ok {
+			ref = source.Ref{Tag: c.Tag}
+		}
+		out := resolver(ref)
+		used++
+		rel := out.Release
+		rel.Tag = c.Tag
+		switch {
+		case out.Rejected != "":
+			rel.MetadataUnresolved, rel.Requires, rel.Created = true, nil, metav1.Time{}
+			rel.Metadata = map[string]string{slicer.RejectedKey: out.Rejected}
+			repairs = append(repairs, rel)
+			delete(mem.backoff, c.Tag)
+			r.event(&rs, "Warning", "MetadataRejected", fmt.Sprintf("%s: %s", c.Tag, out.Rejected))
+		case rel.MetadataUnresolved:
+			mem.failed(c.Tag, now)
+		default:
+			repairs = append(repairs, rel)
+			delete(mem.backoff, c.Tag)
 		}
 	}
 
-	// 4. Admission.
-	admitAll := false
-	if a, ok := src.(source.AdmitAll); ok {
-		admitAll = a.AdmitAll()
+	// 3. Admission: incremental above the catalogue maximum, then backfill
+	// below its minimum (shared with hack/parity).
+	minTag := ""
+	if len(catalogue) > 0 {
+		minTag = catalogue[0].Tag
 	}
-	admitted, rejected := slicer.Admit(catalogue, candidates, src.Less, admitAll)
-	// Expired tags that retention already dropped (or would drop at once) are
-	// still listed by the source; admitting them would make retention and
-	// admission fight forever. Keep them out unless minCount needs them.
-	admitted, expired := slicer.DropExpired(len(catalogue), admitted, now, retDays, int(minCount))
-	rejected = append(rejected, expired...)
-	for _, rej := range rejected {
-		r.markSkipped(&rs, rej.Tag)
+	walkAfter := ""
+	if mem.walkMin == minTag {
+		walkAfter = mem.walkPos
 	}
+	res := cat.Admit(cat.State{Catalogue: catalogue, BackfillComplete: st.BackfillComplete}, dres.Refs, cat.Config{
+		Less:      src.Less,
+		Resolve:   resolver,
+		Budget:    budget - used,
+		Days:      retDays,
+		MinCount:  int(minCount),
+		Now:       now,
+		WalkAfter: walkAfter,
+		Held:      func(tag string) bool { return mem.held(tag, now) },
+	})
+	for _, tag := range res.Transient {
+		mem.failed(tag, now)
+	}
+	for _, tag := range res.Retry {
+		mem.failed(tag, now)
+	}
+	for _, rj := range res.Rejections {
+		r.event(&rs, "Warning", "MetadataRejected", fmt.Sprintf("%s: %s", rj.Tag, rj.Reason))
+	}
+	mem.walkMin, mem.walkPos = minTag, res.WalkPos
+	if res.WalkPos == "" {
+		mem.walkPos = walkAfter
+	}
+	leftover := res.Leftover + repairLeft
 
-	// 5-7. Plan and apply.
+	// 4. Plan and apply.
 	cfg := slicer.Config{
 		Namespace:     rs.Namespace,
 		Source:        rs.Name,
@@ -362,35 +438,38 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		MaxPerSlice:   r.MaxReleasesPerSlice,
 		MaxBytes:      r.MaxSliceBytes,
 	}
-	plan := slicer.Compute(slicer.Input{Existing: existing, New: admitted, Repairs: repairs}, cfg)
+	plan := slicer.Compute(slicer.Input{Existing: existing, New: res.Admitted, Repairs: repairs}, cfg)
+	for _, tag := range plan.RepairsRejected {
+		delete(mem.backoff, tag)
+		r.event(&rs, "Warning", "MetadataRejected", fmt.Sprintf("%s: resolved metadata would grow its slice over the size limit", tag))
+	}
 	if conflict, err := r.apply(ctx, rs.Namespace, plan); err != nil {
 		return ctrl.Result{}, err
 	} else if conflict {
 		return ctrl.Result{RequeueAfter: syncingRequeue}, nil
 	}
 
-	// 8. Status from the post-plan state.
+	// 5. Status from the post-plan state.
 	final := slicer.Merge(plan.Final)
 	st.Count = int32(len(final))
 	releasesGauge.WithLabelValues(sourceKind(&rs), rs.Namespace, rs.Name).Set(float64(len(final)))
 	slicesGauge.WithLabelValues(sourceKind(&rs), rs.Namespace, rs.Name).Set(float64(len(plan.Final)))
-	st.Slices = nil
+	st.SliceCount = int32(len(plan.Final))
+	st.OpenSlice = ""
 	for _, s := range plan.Final {
-		st.Slices = append(st.Slices, s.Name)
-	}
-	st.NextSliceIndex = plan.NextIndex
-	var newest *kuberikcomv1alpha1.Release
-	for i := range final {
-		if newest == nil || src.Less(*newest, final[i]) {
-			newest = &final[i]
+		if !s.Sealed {
+			st.OpenSlice = s.Name
 		}
 	}
-	if newest == nil {
+	st.NextSliceIndex = plan.NextIndex
+	st.BackfillComplete = res.BackfillComplete
+	if len(final) == 0 {
 		st.Newest, st.Artifact = nil, nil
 	} else {
+		newest := final[len(final)-1] // highest sequence = newest under the policy
 		if st.Newest == nil || st.Newest.Tag != newest.Tag || st.Artifact == nil {
 			if ap, ok := src.(source.ArtifactProvider); ok {
-				if a, aerr := ap.Artifact(ctx, *newest); aerr == nil && a != nil {
+				if a, aerr := ap.Artifact(ctx, newest); aerr == nil && a != nil {
 					st.Artifact = a
 				}
 			}
@@ -402,11 +481,16 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 		st.Newest = ref
 	}
-	if leftover == 0 {
+	pending := leftover > 0 || res.Waiting
+	if !pending {
 		st.Cursor = dres.Cursor
 	}
-	if leftover > 0 {
-		meta.SetStatusCondition(&st.Conditions, metav1.Condition{LastTransitionTime: metav1.NewTime(r.now()), Type: kuberikcomv1alpha1.SyncingCondition, Status: metav1.ConditionTrue, Reason: "ResolveBudget", Message: fmt.Sprintf("%d tags left to resolve", leftover), ObservedGeneration: rs.Generation})
+	if pending {
+		reason, msg := "ResolveBudget", fmt.Sprintf("%d tags left to resolve", leftover)
+		if res.Waiting && leftover == 0 {
+			reason, msg = "Backoff", "waiting to retry a tag that failed to resolve"
+		}
+		meta.SetStatusCondition(&st.Conditions, metav1.Condition{LastTransitionTime: metav1.NewTime(r.now()), Type: kuberikcomv1alpha1.SyncingCondition, Status: metav1.ConditionTrue, Reason: reason, Message: msg, ObservedGeneration: rs.Generation})
 	} else {
 		meta.SetStatusCondition(&st.Conditions, metav1.Condition{LastTransitionTime: metav1.NewTime(r.now()), Type: kuberikcomv1alpha1.SyncingCondition, Status: metav1.ConditionFalse, Reason: "Idle", Message: "nothing to resolve", ObservedGeneration: rs.Generation})
 	}
@@ -414,8 +498,34 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if !plan.Empty() || st.LastSyncTime == nil || now.Sub(st.LastSyncTime.Time) >= lastSyncWriteEvery {
 		st.LastSyncTime = &metav1.Time{Time: now}
 	}
-	if leftover > 0 {
+
+	// Requeue: at once only while budget-limited admission made progress;
+	// otherwise at the soonest retry of a backed-off tag, never sooner than
+	// 1 s and never later than the interval.
+	if leftover > 0 && (len(res.Admitted) > 0 || len(repairs) > 0) {
 		return r.finish(ctx, &rs, st, interval, syncingRequeue)
+	}
+	var soonest time.Time
+	for _, c := range final {
+		if c.MetadataUnresolved && !rejectedTag(c) {
+			if e, ok := mem.backoff[c.Tag]; ok && (soonest.IsZero() || e.next.Before(soonest)) {
+				soonest = e.next
+			}
+		}
+	}
+	for _, tag := range res.Retry {
+		if e, ok := mem.backoff[tag]; ok && (soonest.IsZero() || e.next.Before(soonest)) {
+			soonest = e.next
+		}
+	}
+	if !soonest.IsZero() {
+		d := soonest.Sub(now)
+		if d < time.Second {
+			d = time.Second
+		}
+		if d < interval {
+			return r.finish(ctx, &rs, st, interval, d)
+		}
 	}
 	return r.finish(ctx, &rs, st, interval, 0)
 }
@@ -429,35 +539,6 @@ func retention(rs *kuberikcomv1alpha1.ReleaseSource) (days int32, minCount int32
 		minCount = *rs.Spec.Retention.MinCount
 	}
 	return
-}
-
-func (r *ReleaseSourceReconciler) skippedFor(rs *kuberikcomv1alpha1.ReleaseSource) map[string]struct{} {
-	r.skipMu.Lock()
-	defer r.skipMu.Unlock()
-	return r.skipped[skipKey{rs.UID, rs.Generation}]
-}
-
-func (r *ReleaseSourceReconciler) markSkipped(rs *kuberikcomv1alpha1.ReleaseSource, tag string) {
-	r.skipMu.Lock()
-	defer r.skipMu.Unlock()
-	if r.skipped == nil {
-		r.skipped = map[skipKey]map[string]struct{}{}
-	}
-	k := skipKey{rs.UID, rs.Generation}
-	if r.skipped[k] == nil {
-		r.skipped[k] = map[string]struct{}{}
-	}
-	r.skipped[k][tag] = struct{}{}
-}
-
-func (r *ReleaseSourceReconciler) forgetSkipped(uid types.UID) {
-	r.skipMu.Lock()
-	defer r.skipMu.Unlock()
-	for k := range r.skipped {
-		if k.uid == uid {
-			delete(r.skipped, k)
-		}
-	}
 }
 
 func (r *ReleaseSourceReconciler) listSlices(ctx context.Context, rs *kuberikcomv1alpha1.ReleaseSource) ([]kuberikcomv1alpha1.ReleaseSlice, error) {

@@ -43,16 +43,18 @@ type Source interface {
 	// Release with MetadataUnresolved=true and a nil error; only a permanent
 	// policy failure (e.g. requires annotations over the bound) returns an error.
 	Resolve(ctx context.Context, ref Ref) (Release, error)
-	// Less orders two releases under the source's policy, for monotonic
-	// admission and newest-first resolve. Nil policy: by created.
+	// Less orders two releases under the source's policy. It is the only thing
+	// admission looks at for tags that are not resolved yet, so it must work on
+	// tag stubs (Release{Tag}) or the listing's Partial. A policy is required.
 	Less(a, b Release) bool
 }
 
-// AdmitAll is an optional interface. A source that returns true has no
-// ordering policy: the reconciler skips monotonic admission and admits every
-// discovered release (OCI with neither policy nor imagePolicyRef policy).
-type AdmitAll interface {
-	AdmitAll() bool
+// Identifier is an optional interface. Identity returns what the catalogue is
+// built from after references are followed (OCI: the repository of the
+// ImagePolicy's ImageRepository). The reconciler stores it in the identity
+// annotation so a referenced object changing its image rebuilds the catalogue.
+type Identifier interface {
+	Identity() string
 }
 
 // Rejecter is an optional interface. After Resolve, a source that recorded a

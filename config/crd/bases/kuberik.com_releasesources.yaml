@@ -102,7 +102,10 @@ spec:
                     description: Insecure allows plain HTTP registries.
                     type: boolean
                   policy:
-                    description: Policy has the Flux ImagePolicy shape.
+                    description: |-
+                      Policy has the Flux ImagePolicy shape. Required with image: release
+                      order and admission are defined by it (with imagePolicyRef the
+                      ImagePolicy carries it).
                     maxProperties: 1
                     properties:
                       alphabetical:
@@ -155,6 +158,8 @@ spec:
                 x-kubernetes-validations:
                 - message: exactly one of image or imagePolicyRef must be set
                   rule: has(self.image) != has(self.imagePolicyRef)
+                - message: policy is required when image is set
+                  rule: '!has(self.image) || has(self.policy)'
               retention:
                 default: {}
                 description: Retention controls when whole old slices are dropped.
@@ -197,6 +202,12 @@ spec:
                     maxLength: 256
                     type: string
                 type: object
+              backfillComplete:
+                description: |-
+                  BackfillComplete is true once the catalogue reaches back to the
+                  retention window (or the registry has no older tags). While false the
+                  controller keeps walking older tags in policy-descending order.
+                type: boolean
               conditions:
                 description: 'Conditions: Ready, SourceReachable, Syncing.'
                 items:
@@ -288,13 +299,17 @@ spec:
               observedGeneration:
                 format: int64
                 type: integer
-              slices:
-                description: 'Slices oldest to newest; the last is open. Convenience
-                  only: readers select by label.'
-                items:
-                  type: string
-                maxItems: 64
-                type: array
+              openSlice:
+                description: OpenSlice is the name of the slice taking new releases
+                  ("" if none).
+                type: string
+              sliceCount:
+                description: |-
+                  SliceCount is the number of ReleaseSlices of this source. Slice names
+                  are not listed (an unbounded catalogue would overflow any list bound);
+                  readers select slices by the kuberik.com/release-source label.
+                format: int32
+                type: integer
             type: object
         required:
         - spec

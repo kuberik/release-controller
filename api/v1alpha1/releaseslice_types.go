@@ -43,6 +43,10 @@ type Release struct {
 	// +kubebuilder:validation:MaxLength=128
 	// +optional
 	Revision *string `json:"revision,omitempty"`
+	// Sequence is the admission order. Readers sort by it (not by created).
+	// Sequence order equals policy order: incremental releases get max+1..,
+	// backfilled releases get min-1.. going down. Never renumbered.
+	Sequence int64 `json:"sequence"`
 	// Created is source-provided, else firstSeen (createdObserved=true).
 	Created metav1.Time `json:"created"`
 	// +optional
@@ -96,7 +100,7 @@ type ReleaseSlice struct {
 	OldestCreated *metav1.Time `json:"oldestCreated,omitempty"`
 	// +optional
 	NewestCreated *metav1.Time `json:"newestCreated,omitempty"`
-	// Releases sorted by (created, tag).
+	// Releases sorted by sequence ascending.
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=1000
 	Releases []Release `json:"releases"`

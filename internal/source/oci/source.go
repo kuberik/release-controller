@@ -50,7 +50,7 @@ type Source struct {
 
 var (
 	_ source.Source           = (*Source)(nil)
-	_ source.AdmitAll         = (*Source)(nil)
+	_ source.Identifier       = (*Source)(nil)
 	_ source.ArtifactProvider = (*Source)(nil)
 	_ source.Rejecter         = (*Source)(nil)
 	_ source.TagSkipper       = (*Source)(nil)
@@ -64,6 +64,9 @@ func New(cfg Config) (*Source, error) {
 	ext, err := newExtractor(cfg.FilterTags)
 	if err != nil {
 		return nil, err
+	}
+	if cfg.Policy == nil {
+		return nil, errors.New("oci: a policy is required (spec.oci.policy, or an ImagePolicy with one)")
 	}
 	pol, err := newPolicy(cfg.Policy)
 	if err != nil {
@@ -91,10 +94,8 @@ func (s *Source) opts() []crane.Option {
 	return o
 }
 
-// AdmitAll reports that no ordering policy is configured, so monotonic
-// admission does not apply and every discovered tag is admitted. The reconciler
-// detects this with an `interface{ AdmitAll() bool }` assertion.
-func (s *Source) AdmitAll() bool { return s.pol.kind == policyNone }
+// Identity is the repository the catalogue is built from.
+func (s *Source) Identity() string { return s.cfg.Image }
 
 // Discover lists all tags (crane.ListTags follows registry pagination), keeps
 // those passing filterTags.pattern and, for semver/numerical, those orderable
@@ -313,15 +314,8 @@ func clipArtifact(am *v1alpha1.ArtifactMetadata) {
 }
 
 // Less orders releases under the policy, applied to the extracted tag value
-// (the tag alone determines it, so no state is needed). With no policy, by
-// created then tag.
+// (the tag alone determines it, so no state is needed and tag stubs work).
 func (s *Source) Less(a, b source.Release) bool {
-	if s.pol.kind == policyNone {
-		if !a.Created.Equal(&b.Created) {
-			return a.Created.Before(&b.Created)
-		}
-		return a.Tag < b.Tag
-	}
 	ea, _ := s.ext.apply(a.Tag)
 	eb, _ := s.ext.apply(b.Tag)
 	return s.pol.less(ea, eb)
