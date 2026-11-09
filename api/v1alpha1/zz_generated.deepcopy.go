@@ -21,8 +21,8 @@ limitations under the License.
 package v1alpha1
 
 import (
-	"k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -76,7 +76,7 @@ func (in *OCISource) DeepCopyInto(out *OCISource) {
 	*out = *in
 	if in.SecretRef != nil {
 		in, out := &in.SecretRef, &out.SecretRef
-		*out = new(v1.LocalObjectReference)
+		*out = new(corev1.LocalObjectReference)
 		**out = **in
 	}
 	if in.FilterTags != nil {
@@ -91,7 +91,7 @@ func (in *OCISource) DeepCopyInto(out *OCISource) {
 	}
 	if in.ImagePolicyRef != nil {
 		in, out := &in.ImagePolicyRef, &out.ImagePolicyRef
-		*out = new(v1.LocalObjectReference)
+		*out = new(corev1.LocalObjectReference)
 		**out = **in
 	}
 }
@@ -345,7 +345,11 @@ func (in *ReleaseSourceSpec) DeepCopyInto(out *ReleaseSourceSpec) {
 		*out = new(OCISource)
 		(*in).DeepCopyInto(*out)
 	}
-	out.Interval = in.Interval
+	if in.Interval != nil {
+		in, out := &in.Interval, &out.Interval
+		*out = new(v1.Duration)
+		**out = **in
+	}
 	in.Retention.DeepCopyInto(&out.Retention)
 }
 
@@ -383,7 +387,7 @@ func (in *ReleaseSourceStatus) DeepCopyInto(out *ReleaseSourceStatus) {
 	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
-		*out = make([]metav1.Condition, len(*in))
+		*out = make([]v1.Condition, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}

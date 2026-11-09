@@ -47,7 +47,7 @@ type ReleaseSourceSpec struct {
 	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ms|s|m|h))+$`
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('10s')",message="interval must be at least 10s"
 	// +optional
-	Interval metav1.Duration `json:"interval,omitempty"`
+	Interval *metav1.Duration `json:"interval,omitempty"`
 
 	// Suspend stops syncing while true.
 	// +optional

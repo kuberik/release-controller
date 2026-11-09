@@ -6,4 +6,9 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: releaseslice-sample
 spec:
-  # TODO(user): Add fields here
+  source: releasesource-sample
+  sealed: false
+  releases:
+  - tag: v1.0.0
+    created: "2026-01-01T00:00:00Z"
+    firstSeen: "2026-01-01T00:00:00Z"
