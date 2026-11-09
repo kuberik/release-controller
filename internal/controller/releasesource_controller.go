@@ -102,6 +102,8 @@ type sourceMem struct {
 	// blockedID is the identity whose change was reported as blocked, so the
 	// Warning fires on the transition, not on every retry.
 	blockedID string
+	// unresolvable are backfill tags already reported as TagUnresolvable.
+	unresolvable map[string]bool
 }
 
 const (
@@ -448,6 +450,15 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	for _, tag := range res.Retry {
 		mem.failed(tag, now)
 	}
+	for _, tag := range res.Unresolvable {
+		if mem.unresolvable == nil {
+			mem.unresolvable = map[string]bool{}
+		}
+		if !mem.unresolvable[tag] {
+			mem.unresolvable[tag] = true
+			r.event(&rs, "Warning", "TagUnresolvable", fmt.Sprintf("%s: metadata could not be resolved after %d attempts; excluded from the backfilled catalogue", tag, cat.MaxAttempts))
+		}
+	}
 	for _, rj := range res.Rejections {
 		r.event(&rs, "Warning", "MetadataRejected", fmt.Sprintf("%s: %s", rj.Tag, rj.Reason))
 	}
@@ -472,7 +483,17 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		r.event(&rs, "Warning", "MetadataRejected", fmt.Sprintf("%s: resolved metadata would grow its slice over the size limit", tag))
 	}
 	if err := slicer.CheckSequences(plan.Final); err != nil {
-		return ctrl.Result{}, fmt.Errorf("refusing to write the plan: %w", err)
+		// Surface the refusal: Ready=False, one Warning on the transition,
+		// nothing written. Retry soon (a stale list can clear on its own).
+		if c := meta.FindStatusCondition(st.Conditions, kuberikcomv1alpha1.ReadyCondition); c == nil || c.Reason != "SequenceCollision" {
+			r.event(&rs, "Warning", "SequenceCollision", err.Error())
+		}
+		r.setReady(st, rs.Generation, false, "SequenceCollision", "refusing to write: "+err.Error())
+		retry := interval
+		if retry > time.Minute {
+			retry = time.Minute
+		}
+		return r.finish(ctx, &rs, st, interval, retry)
 	}
 	if conflict, err := r.apply(ctx, rs.Namespace, plan); err != nil {
 		return ctrl.Result{}, err

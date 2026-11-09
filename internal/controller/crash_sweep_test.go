@@ -10,6 +10,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -348,6 +349,16 @@ var _ = Describe("crash sweep, backfill stubs, sequence collision", func() {
 		want := run(false)
 		got := run(true)
 		_, _ = fmt.Printf("QA4 STUB diff control->failing: %s\n", diff(want, got))
+		Expect(diff(want, got)).To(BeEmpty())
+		Expect(got).NotTo(HaveKey(fakeTag(25)))
+		rec := r.Recorder.(*record.FakeRecorder)
+		unres := 0
+		for len(rec.Events) > 0 {
+			if strings.Contains(<-rec.Events, "TagUnresolvable") {
+				unres++
+			}
+		}
+		Expect(unres).To(Equal(1), "TagUnresolvable fires once")
 	})
 
 	It("stub of a legit tag lets a later-built lower tag in", func() {
@@ -383,6 +394,11 @@ var _ = Describe("crash sweep, backfill stubs, sequence collision", func() {
 		want := run(false)
 		got := run(true)
 		_, _ = fmt.Printf("QA4 STUB2 diff control->failing: %s\n", diff(want, got))
+		// The unresolvable tag is excluded. Its created time is unknowable, so
+		// the quick backport below it is then judged against tag 26 and gets in:
+		// the one documented residue of excluding instead of stubbing.
+		Expect(got).NotTo(HaveKey(fakeTag(25)))
+		Expect(want).To(HaveKey(fakeTag(25)))
 	})
 
 	It("CheckSequences backstop without APIReader (stale list reaches admission)", func() {
@@ -435,5 +451,19 @@ var _ = Describe("crash sweep, backfill stubs, sequence collision", func() {
 			evs = append(evs, <-rec.Events)
 		}
 		_, _ = fmt.Printf("QA4 WEDGE errs=%d/5 count=%d (want 15) conds=%v events=%v\n", errs, len(m), conds, evs)
+		Expect(errs).To(Equal(0))
+		Expect(len(m)).To(Equal(12), "no writes while the collision stands")
+		ready := meta.FindStatusCondition(rs.Status.Conditions, kuberikcomv1alpha1.ReadyCondition)
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready.Reason).To(Equal("SequenceCollision"))
+		Expect(ready.Message).To(ContainSubstring("is held by both"))
+		collisionEvents := 0
+		for _, e := range evs {
+			if strings.Contains(e, "SequenceCollision") {
+				collisionEvents++
+			}
+		}
+		Expect(collisionEvents).To(Equal(1), "one Warning on the transition")
 	})
 })

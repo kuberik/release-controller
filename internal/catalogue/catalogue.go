@@ -19,6 +19,12 @@
 //     admitted and the last one is older than the retention cutoff, or when
 //     the tags run out; the caller then records BackfillComplete.
 //
+// A backfill tag whose resolve keeps failing transiently holds the walk, and
+// after MaxAttempts failures is excluded and reported (Result.Unresolvable),
+// never admitted as a stub: that would bypass the created rule. Incremental
+// tags are above the maximum and cannot be backports, so a failing one is still
+// admitted unresolved and repaired later.
+//
 // Releases without a created time (an image with no created annotation, or
 // metadata that could not be resolved) are admitted by position alone: their
 // created is firstSeen (createdObserved=true), which says nothing about when
@@ -85,13 +91,16 @@ type Config struct {
 	// backfill walk (order matters), it is not skipped.
 	Held func(tag string) bool
 	// Attempts reports how many resolves of a tag already failed transiently.
-	// A walk tag whose failure would be its MaxAttempts-th is admitted
-	// unresolved (repaired later) so the walk can finish. Nil means never.
+	// A walk tag whose failure would be its MaxAttempts-th is excluded (see
+	// Result.Unresolvable) so the walk can finish. Nil means never.
 	Attempts func(tag string) int
 }
 
 // MaxAttempts is the number of transient resolve failures after which a
-// backfill tag is admitted unresolved instead of holding the walk.
+// backfill tag is excluded instead of holding the walk. Admitting it as an
+// unresolved stub would let a backport in: a stub has no created time, so the
+// created rule cannot be applied to it and the catalogue would stop being a
+// function of registry state.
 const MaxAttempts = 5
 
 // Rejection is a permanent rejection recorded in this Admit.
@@ -121,7 +130,10 @@ type Result struct {
 	// a backed-off tag rather than on the budget; the caller should requeue
 	// after the backoff, not at once.
 	Waiting bool
-	// Transient are Admitted tags stored unresolved after a transient failure;
+	// Unresolvable are backfill tags excluded after MaxAttempts transient
+	// failures; the walk went past them. The caller emits a Warning once.
+	Unresolvable []string
+	// Transient are incrementally Admitted tags stored unresolved after a transient failure;
 	// the caller schedules their repair.
 	Transient []string
 }
@@ -314,13 +326,17 @@ func Admit(st State, refs []source.Ref, cfg Config) Result {
 			// Transient failure: without created the rule cannot be applied,
 			// and skipping would lose the tag's place. Hold the walk here (the
 			// position stays before this tag) and retry later, unless it has
-			// failed MaxAttempts times: then it is stored unresolved (repaired
-			// later) so the walk can finish.
+			// failed MaxAttempts times: then it is excluded (never admitted as
+			// a stub, which would bypass the created rule) and the walk
+			// continues past it.
 			if cfg.Attempts == nil || cfg.Attempts(ref.Tag)+1 < MaxAttempts {
 				res.Retry = append(res.Retry, ref.Tag)
 				res.Waiting, done = true, false
 				break
 			}
+			res.WalkPos = ref.Tag
+			res.Unresolvable = append(res.Unresolvable, ref.Tag)
+			continue
 		}
 		res.WalkPos = ref.Tag
 		real := hasCreated(rel)

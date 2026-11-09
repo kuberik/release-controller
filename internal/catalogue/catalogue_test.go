@@ -348,9 +348,10 @@ func TestWalkPosDoesNotAdvancePastTransientTag(t *testing.T) {
 	}
 }
 
-// B1 cap: after MaxAttempts failures the tag is admitted unresolved so the
-// walk can finish; it is repaired later.
-func TestWalkAdmitsStubAfterMaxAttempts(t *testing.T) {
+// After MaxAttempts failures a backfill tag is EXCLUDED, not admitted as a
+// stub (a stub has no created time and would bypass the created rule), the
+// walk continues past it and the tag is reported as unresolvable.
+func TestWalkExcludesTagAfterMaxAttempts(t *testing.T) {
 	r := newReg(10)
 	r.transient[tag(8)] = true
 	now := day0.Add(12 * 24 * time.Hour)
@@ -363,16 +364,26 @@ func TestWalkAdmitsStubAfterMaxAttempts(t *testing.T) {
 	}
 	attempts = MaxAttempts - 1 // this resolve is the MaxAttempts-th failure
 	res = Admit(State{}, r.refs(), cfg)
-	if res.Waiting || !res.BackfillComplete || len(res.Admitted) != 10 {
+	if res.Waiting || !res.BackfillComplete || len(res.Admitted) != 9 {
 		t.Fatalf("waiting %v complete %v admitted %d", res.Waiting, res.BackfillComplete, len(res.Admitted))
 	}
-	if fmt.Sprint(res.Transient) != "[t008]" {
-		t.Fatalf("transient %v", res.Transient)
+	if fmt.Sprint(res.Unresolvable) != "[t008]" || len(res.Transient) != 0 {
+		t.Fatalf("unresolvable %v transient %v", res.Unresolvable, res.Transient)
 	}
 	for _, a := range res.Admitted {
-		if a.Tag == tag(8) && !a.MetadataUnresolved {
-			t.Fatal("capped tag must be stored unresolved")
+		if a.Tag == tag(8) {
+			t.Fatal("exhausted tag must not be admitted")
 		}
+	}
+}
+
+// Defence in depth: a stored backfillComplete=true next to an empty catalogue
+// is not trusted.
+func TestCompleteFlagIgnoredWhenCatalogueEmpty(t *testing.T) {
+	r := newReg(10)
+	res := Admit(State{BackfillComplete: true}, r.refs(), r.cfg(day0.Add(12*24*time.Hour), 0, 3, 100))
+	if len(res.Admitted) != 10 {
+		t.Fatalf("admitted %d, want 10", len(res.Admitted))
 	}
 }
 

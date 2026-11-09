@@ -238,9 +238,9 @@ var _ = Describe("Backfill walk under faults (QA round 2)", func() {
 		Expect(count).To(Equal(40))
 	})
 
-	It("P4': permanently unresolvable tags are backed off, capped, and none is skipped", func() {
+	It("P4': permanently unresolvable tags are backed off, capped, excluded, and the walk completes", func() {
 		fake.addN(0, 20)
-		for i := 0; i < 20; i++ {
+		for i := 0; i < 15; i++ {
 			fake.unresolved[fakeTag(i)] = true
 		}
 		var requeues []time.Duration
@@ -248,15 +248,17 @@ var _ = Describe("Backfill walk under faults (QA round 2)", func() {
 			res := syncOK()
 			requeues = append(requeues, res.RequeueAfter)
 			clock = clock.Add(res.RequeueAfter)
-			if c, _, _, _ := audit(20); c == 20 && complete() {
+			if complete() {
 				break
 			}
 		}
 		count, missing, dup, disorder := audit(20)
 		GinkgoWriter.Printf("P4' syncs=%d resolves=%d elapsed=%s count=%d missing=%v\n", len(requeues), fake.resolves, clock.Sub(baseTime.Add(time.Hour)), count, missing)
-		Expect(missing).To(BeEmpty())
+		// The 15 unresolvable tags are excluded (not stubbed: a stub would bypass
+		// the created rule); the 5 resolvable ones are all there.
+		Expect(missing).To(Equal([]int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}))
 		Expect(dup + disorder).To(BeZero())
-		Expect(count).To(Equal(20))
+		Expect(count).To(Equal(5))
 		Expect(complete()).To(BeTrue())
 		// Backoff: the first requeues after a failure are not 1s hot loops.
 		hot := 0
