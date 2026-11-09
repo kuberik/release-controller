@@ -8,3 +8,9 @@ metadata:
 spec:
   oci:
     image: ghcr.io/example/app
+    filterTags:
+      pattern: '^main-(?P<ts>[0-9]+)-[a-f0-9]+$'
+      extract: '$ts'
+    policy:
+      numerical:
+        order: asc

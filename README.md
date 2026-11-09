@@ -13,6 +13,38 @@ Design: `internal/design/release-controller.md` (§9 migration, §10 RBAC, §11 
 | `ReleaseSource` | `relsrc` | users (one per image, in the Rollout's namespace) | Where releases come from (`spec.oci`: an `imagePolicyRef`, or `image` + `secretRef` + `filterTags` + `policy`) and `spec.retention` (`days`, default 7; `minCount`, default 30). |
 | `ReleaseSlice` | | release-controller only | A sealed or open chunk of the catalogue. Never user-writable. |
 
+A policy is required: `spec.oci.policy` with `image` (a Flux ImagePolicy always
+carries one, so `imagePolicyRef` needs nothing extra).
+
+## How releases are admitted and ordered
+
+Every release has a `sequence`; readers sort by it (not by `created`). Sequence order
+is policy order, numbers are never reused or renumbered, so sealed slices stay sealed.
+
+- **Incremental**: a listed tag above the catalogue's maximum under the policy is
+  admitted, oldest first within `--max-resolves-per-sync`, numbered max+1, max+2, ...
+  Tags below the maximum are never resolved again (a restart costs one tag listing).
+- **Backfill** (empty catalogue, or `status.backfillComplete=false`): walks the listed
+  tags below the catalogue's minimum, newest first, writing each batch. A tag is
+  admitted iff its `created` is not later than that of every admitted tag above it
+  (it was the newest when pushed; backports and retags fail this). Releases with no
+  created annotation are admitted by position (`created` = first seen, flagged
+  `createdObserved`); they neither get rejected by the rule nor tighten it. The walk
+  stops once `retention.minCount` releases are admitted and the last one is older than
+  `retention.days`, or when the tags run out, then `backfillComplete=true`. A restart
+  resumes from the catalogue's minimum.
+- **Rejections**: a bounds violation is stored once with `metadataUnresolved: true` and
+  `metadata["kuberik.com/rejected"]=<reason>`, one `MetadataRejected` Event, never
+  retried. Transient failures retry per tag with backoff (10 s up to 1 h).
+- **Retention** drops whole sealed slices, oldest by minimum sequence, while every
+  release in them is expired and `minCount` stays met. The open slice and the slice
+  holding the newest release are never dropped; a backfill leaves the lowest sequences
+  in the open slice, so retention starts once it seals and a newer slice opens.
+- **Rebuild**: slices are not user-editable. To rebuild a catalogue delete **all** of
+  its slices; the controller backfills from scratch. Changing the image (or the image
+  of the referenced ImageRepository) rebuilds too, after the new config lists
+  successfully.
+
 There is no automatic materialisation: you create one `ReleaseSource` per image and
 set `spec.releaseSourceRef` on each Rollout yourself.
 

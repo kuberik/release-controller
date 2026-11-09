@@ -1,14 +1,16 @@
+# Written by release-controller only; shown for the shape.
 apiVersion: kuberik.com/v1alpha1
 kind: ReleaseSlice
 metadata:
   labels:
     app.kubernetes.io/name: release-controller
     app.kubernetes.io/managed-by: kustomize
-  name: releaseslice-sample
-spec:
-  source: releasesource-sample
-  sealed: false
-  releases:
-  - tag: v1.0.0
-    created: "2026-01-01T00:00:00Z"
-    firstSeen: "2026-01-01T00:00:00Z"
+    kuberik.com/release-source: releasesource-sample
+  name: releasesource-sample-00000
+source: releasesource-sample
+sealed: false
+releases:
+- tag: v1.0.0
+  sequence: 4294967296
+  created: "2026-01-01T00:00:00Z"
+  firstSeen: "2026-01-01T00:00:00Z"
