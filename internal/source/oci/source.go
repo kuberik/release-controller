@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"sync"
 
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -25,13 +26,18 @@ type Config struct {
 	Insecure   bool
 	FilterTags *v1alpha1.TagFilter
 	Policy     *v1alpha1.OrderPolicy
-	Keychain   authn.Keychain // nil means authn.DefaultKeychain
+	// Exclude are regular expressions of tags to ignore (Flux
+	// ImageRepository.spec.exclusionList; Flux scans drop matching tags before
+	// the policy sees them).
+	Exclude  []string
+	Keychain authn.Keychain // nil means authn.DefaultKeychain
 }
 
 // Source implements source.Source for OCI repositories.
 type Source struct {
 	cfg Config
 	ext *extractor
+	exc []*regexp.Regexp
 	pol *policy
 
 	mu       sync.Mutex
@@ -53,10 +59,18 @@ func New(cfg Config) (*Source, error) {
 	if err != nil {
 		return nil, err
 	}
+	var exc []*regexp.Regexp
+	for _, e := range cfg.Exclude {
+		re, err := regexp.Compile(e)
+		if err != nil {
+			return nil, fmt.Errorf("invalid exclusion pattern %q: %w", e, err)
+		}
+		exc = append(exc, re)
+	}
 	if cfg.Keychain == nil {
 		cfg.Keychain = authn.DefaultKeychain
 	}
-	return &Source{cfg: cfg, ext: ext, pol: pol, artifact: map[string]*v1alpha1.ArtifactMetadata{}}, nil
+	return &Source{cfg: cfg, ext: ext, exc: exc, pol: pol, artifact: map[string]*v1alpha1.ArtifactMetadata{}}, nil
 }
 
 func (s *Source) opts() []crane.Option {
@@ -82,6 +96,9 @@ func (s *Source) Discover(ctx context.Context, _ string) (source.DiscoverResult,
 	}
 	refs := make([]source.Ref, 0, len(tags))
 	for _, tag := range tags {
+		if s.excluded(tag) {
+			continue
+		}
 		extracted, ok := s.ext.apply(tag)
 		if !ok || !s.pol.admits(extracted) {
 			continue
@@ -215,4 +232,13 @@ func (s *Source) Less(a, b source.Release) bool {
 	ea, _ := s.ext.apply(a.Tag)
 	eb, _ := s.ext.apply(b.Tag)
 	return s.pol.less(ea, eb)
+}
+
+func (s *Source) excluded(tag string) bool {
+	for _, re := range s.exc {
+		if re.MatchString(tag) {
+			return true
+		}
+	}
+	return false
 }

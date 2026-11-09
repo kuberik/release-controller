@@ -483,7 +483,7 @@ func TestImagePolicyRef(t *testing.T) {
 	_ = v1alpha1.AddToScheme(scheme)
 	_ = AddToScheme(scheme)
 	repo := &imagev1.ImageRepository{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "repo"},
-		Spec: imagev1.ImageRepositorySpec{Image: r.host + "/app", Insecure: true}}
+		Spec: imagev1.ImageRepositorySpec{Image: r.host + "/app", Insecure: true, ExclusionList: []string{`^main-2$`}}}
 	pol := &imagev1.ImagePolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pol"},
 		Spec: imagev1.ImagePolicySpec{
 			ImageRepositoryRef: meta.NamespacedObjectReference{Name: "repo"},
@@ -498,7 +498,7 @@ func TestImagePolicyRef(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := src.Discover(context.Background(), "")
-	if err != nil || len(res.Refs) != 2 {
+	if err != nil || len(res.Refs) != 1 || res.Refs[0].Tag != "main-1" { // main-2 is in exclusionList
 		t.Fatalf("%v %v", res, err)
 	}
 	if !src.Less(source.Release{Tag: "main-1"}, source.Release{Tag: "main-2"}) {

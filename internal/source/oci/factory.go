@@ -59,6 +59,7 @@ func ResolveConfig(ctx context.Context, c client.Reader, rs *v1alpha1.ReleaseSou
 		}
 		cfg.Image = repo.Spec.Image
 		cfg.Insecure = repo.Spec.Insecure
+		cfg.Exclude = repo.Spec.ExclusionList
 		if repo.Spec.SecretRef != nil {
 			secretName = repo.Spec.SecretRef.Name
 		}
