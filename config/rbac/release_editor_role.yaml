@@ -1,0 +1,16 @@
+# Users edit ReleaseSources through the built-in edit role. ReleaseSlice is
+# never user-writable, so it is deliberately absent here.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: source-editor
+  labels:
+    app.kubernetes.io/name: release-controller
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+rules:
+- apiGroups: ["kuberik.com"]
+  resources: ["releasesources"]
+  verbs: ["create", "update", "patch", "delete"]
+- apiGroups: ["kuberik.com"]
+  resources: ["releasesources/status"]
+  verbs: ["get"]

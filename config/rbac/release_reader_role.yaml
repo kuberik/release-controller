@@ -1,0 +1,14 @@
+# Read access to the catalogue. Aggregated into the built-in view role so
+# namespace viewers see ReleaseSources and ReleaseSlices. Bind to the dashboard
+# and environment-controller service accounts.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: reader
+  labels:
+    app.kubernetes.io/name: release-controller
+    rbac.authorization.k8s.io/aggregate-to-view: "true"
+rules:
+- apiGroups: ["kuberik.com"]
+  resources: ["releasesources", "releaseslices"]
+  verbs: ["get", "list", "watch"]

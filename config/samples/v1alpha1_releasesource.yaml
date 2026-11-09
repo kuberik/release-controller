@@ -1,0 +1,9 @@
+apiVersion: kuberik.com/v1alpha1
+kind: ReleaseSource
+metadata:
+  labels:
+    app.kubernetes.io/name: release-controller
+    app.kubernetes.io/managed-by: kustomize
+  name: releasesource-sample
+spec:
+  # TODO(user): Add fields here
