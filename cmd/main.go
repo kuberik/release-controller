@@ -37,6 +37,7 @@ import (
 
 	kuberikcomv1alpha1 "github.com/kuberik/release-controller/api/v1alpha1"
 	"github.com/kuberik/release-controller/internal/controller"
+	"github.com/kuberik/release-controller/internal/source/oci"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -49,6 +50,7 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(kuberikcomv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(oci.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
