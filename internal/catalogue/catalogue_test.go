@@ -414,3 +414,43 @@ func TestBackfillCreatedRuleNeverStarvesMinCount(t *testing.T) {
 		t.Fatalf("admitted %d (want the MinCount floor of 20), complete %v", len(res.Admitted), res.BackfillComplete)
 	}
 }
+
+// Once MinCount is met the walk keeps going while releases are still inside the
+// retention window, and stops only at the first one older than the cutoff.
+func TestBackfillWalksPastMinCountWhileInsideWindow(t *testing.T) {
+	r := newReg(30)
+	// t029 was pushed after t030: it still counts toward the MinCount floor.
+	r.created[tag(29)] = day0.Add(30*24*time.Hour + 12*time.Hour)
+	now := day0.Add(30 * 24 * time.Hour) // cutoff = day 23, so t022 is the first past the window
+	res := Admit(State{}, r.refs(), r.cfg(now, 7, 3, 100))
+	if !res.BackfillComplete {
+		t.Fatal("expected complete")
+	}
+	got := make([]string, 0, len(res.Admitted))
+	for _, a := range res.Admitted {
+		got = append(got, a.Tag)
+	}
+	want := []string{"t030", "t029", "t028", "t027", "t026", "t025", "t024", "t023", "t022"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("admitted %v, want %v (all releases inside the window, past MinCount 3)", got, want)
+	}
+}
+
+// runMin keeps the oldest creation time seen so far. A backport admitted under
+// the MinCount floor must not raise it, or a later tag created between the two
+// would slip in as if it were in order.
+func TestBackfillRunMinKeepsTheOldestCreation(t *testing.T) {
+	r := newReg(30)
+	r.created[tag(29)] = day0.Add(30*24*time.Hour + 12*time.Hour) // after t030: admitted only for the floor
+	r.created[tag(28)] = day0.Add(30*24*time.Hour + 6*time.Hour)  // after t030 too: a backport, skipped
+	now := day0.Add(30 * 24 * time.Hour)
+	res := Admit(State{}, r.refs(), r.cfg(now, 7, 2, 100))
+	got := make([]string, 0, len(res.Admitted))
+	for _, a := range res.Admitted {
+		got = append(got, a.Tag)
+	}
+	want := []string{"t030", "t029", "t027", "t026", "t025", "t024", "t023", "t022"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("admitted %v, want %v (t028 was created after t030, so it is a backport)", got, want)
+	}
+}
