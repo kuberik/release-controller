@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -43,6 +44,10 @@ var (
 	// projectImage is the name of the image which will be build and loaded
 	// with the code source changes to be tested.
 	projectImage = "example.com/release-controller:v0.0.1"
+
+	// contextVerified is set only after the current kubectl context has been checked against the
+	// dedicated kind cluster. AfterSuite tears down cluster-wide state and must not run without it.
+	contextVerified = false
 )
 
 // TestE2E runs the end-to-end (e2e) test suite for the project. These tests execute in an isolated,
@@ -50,12 +55,30 @@ var (
 // The default setup requires Kind, builds/loads the Manager Docker image locally, and installs
 // CertManager.
 func TestE2E(t *testing.T) {
+	// The suite installs and uninstalls cluster-wide resources (CRDs, CertManager) in the current
+	// kubectl context. Check the context before any Ginkgo node runs, so a refusal can never reach
+	// AfterSuite's teardown.
+	kindCluster := os.Getenv("KIND_CLUSTER")
+	if kindCluster == "" {
+		kindCluster = "release-controller-test-e2e"
+	}
+	out, err := exec.Command("kubectl", "config", "current-context").Output()
+	if err != nil {
+		t.Fatalf("Refusing to run e2e tests: failed to read the current kubectl context: %v", err)
+	}
+	if err := utils.CheckKubeContext(strings.TrimSpace(string(out)), kindCluster); err != nil {
+		t.Fatalf("Refusing to run e2e tests: %v", err)
+	}
+	contextVerified = true
+
 	RegisterFailHandler(Fail)
 	_, _ = fmt.Fprintf(GinkgoWriter, "Starting release-controller integration test suite\n")
 	RunSpecs(t, "e2e suite")
 }
 
 var _ = BeforeSuite(func() {
+	Expect(contextVerified).To(BeTrue(), "Refusing to run e2e tests: kubectl context was not verified")
+
 	By("building the manager(Operator) image")
 	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", projectImage))
 	_, err := utils.Run(cmd)
@@ -84,6 +107,9 @@ var _ = BeforeSuite(func() {
 })
 
 var _ = AfterSuite(func() {
+	if !contextVerified {
+		return
+	}
 	// Teardown CertManager after the suite if not skipped and if it was not already installed
 	if !skipCertManagerInstall && !isCertManagerAlreadyInstalled {
 		_, _ = fmt.Fprintf(GinkgoWriter, "Uninstalling CertManager...\n")
