@@ -195,6 +195,7 @@ KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+GIT_CLIFF ?= $(LOCALBIN)/git-cliff
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.7.1
@@ -211,6 +212,7 @@ ENVTEST_K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
   printf '%s\n' "$$v" | sed -E 's/^v?[0-9]+\.([0-9]+).*/1.\1/')
 
 GOLANGCI_LINT_VERSION ?= v2.5.0
+GIT_CLIFF_VERSION ?= 2.8.0
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
 $(KUSTOMIZE): $(LOCALBIN)
@@ -239,6 +241,30 @@ golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
 
+.PHONY: git-cliff
+git-cliff: $(GIT_CLIFF) ## Download git-cliff locally if necessary.
+$(GIT_CLIFF): $(LOCALBIN)
+	@[ -f "$(GIT_CLIFF)-$(GIT_CLIFF_VERSION)" ] || { \
+		echo "Downloading git-cliff $(GIT_CLIFF_VERSION)..."; \
+		case "$(shell uname -s)-$(shell uname -m)" in \
+			"Darwin-arm64") \
+				curl -L "https://github.com/orhun/git-cliff/releases/download/v$(GIT_CLIFF_VERSION)/git-cliff-$(GIT_CLIFF_VERSION)-aarch64-apple-darwin.tar.gz" | \
+				tar xz -C $(LOCALBIN) --strip-components=1 git-cliff-$(GIT_CLIFF_VERSION)/git-cliff ;; \
+			"Darwin-x86_64") \
+				curl -L "https://github.com/orhun/git-cliff/releases/download/v$(GIT_CLIFF_VERSION)/git-cliff-$(GIT_CLIFF_VERSION)-x86_64-apple-darwin.tar.gz" | \
+				tar xz -C $(LOCALBIN) --strip-components=1 git-cliff-$(GIT_CLIFF_VERSION)/git-cliff ;; \
+			"Linux-x86_64") \
+				curl -L "https://github.com/orhun/git-cliff/releases/download/v$(GIT_CLIFF_VERSION)/git-cliff-$(GIT_CLIFF_VERSION)-x86_64-unknown-linux-gnu.tar.gz" | \
+				tar xz -C $(LOCALBIN) --strip-components=1 git-cliff-$(GIT_CLIFF_VERSION)/git-cliff ;; \
+			"Linux-aarch64") \
+				curl -L "https://github.com/orhun/git-cliff/releases/download/v$(GIT_CLIFF_VERSION)/git-cliff-$(GIT_CLIFF_VERSION)-aarch64-unknown-linux-gnu.tar.gz" | \
+				tar xz -C $(LOCALBIN) --strip-components=1 git-cliff-$(GIT_CLIFF_VERSION)/git-cliff ;; \
+			*) echo "Unsupported platform: $(shell uname -s)-$(shell uname -m)" && exit 1 ;; \
+		esac; \
+		mv $(GIT_CLIFF) $(GIT_CLIFF)-$(GIT_CLIFF_VERSION); \
+	} ;\
+	ln -sf $(GIT_CLIFF)-$(GIT_CLIFF_VERSION) $(GIT_CLIFF)
+
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary
 # $2 - package url which can be installed
@@ -258,3 +284,12 @@ endef
 define gomodver
 $(shell go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' $(1) 2>/dev/null)
 endef
+
+# Release notes generation
+.PHONY: changelog
+changelog: git-cliff ## Generate changelog
+	$(GIT_CLIFF) --tag $(VERSION) --output CHANGELOG.md
+
+.PHONY: changelog-current
+changelog-current: git-cliff ## Generate changelog for the current release
+	$(GIT_CLIFF) --latest --strip all --output CHANGELOG-current.md
