@@ -152,8 +152,8 @@ func (r *ReleaseSourceReconciler) forgetMem(uid types.UID) {
 	delete(r.mem, uid)
 }
 
-// failed registers a failed resolve of tag and returns when to retry:
-// exponential from 10 s, capped at 1 h.
+// failed registers a failed resolve of tag and schedules its next attempt:
+// exponential backoff from backoffInitial, capped at backoffMax.
 func (m *sourceMem) failed(tag string, now time.Time) {
 	e := m.backoff[tag]
 	e.attempts++
