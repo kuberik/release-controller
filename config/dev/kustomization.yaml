@@ -14,6 +14,10 @@ patches:
     - op: replace
       path: /spec/template/spec/containers/0/image
       value: ko://github.com/kuberik/release-controller/cmd
+    # ko images start at /ko-app/<name>; the scaffold's `command: [/manager]`
+    # does not exist in them, so let the image entrypoint run.
+    - op: remove
+      path: /spec/template/spec/containers/0/command
 # kuberik-system already exists (owned by the other kuberik controllers).
 - target:
     kind: Namespace
