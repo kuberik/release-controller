@@ -11,6 +11,9 @@ import (
 	"github.com/kuberik/release-controller/api/v1alpha1"
 )
 
+// firstSlice is the name of the first slice a source writes.
+const firstSlice = "src-00001"
+
 var t0 = time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
 
 // rel is a release with sequence == mins and created mins minutes after t0.
@@ -61,7 +64,7 @@ func TestAppendIntoOpenOnlyTouchesOpen(t *testing.T) {
 	s := Compute(Input{New: []v1alpha1.Release{rel("a", 1), rel("b", 2), rel("c", 3), rel("d", 4)}}, c).Final
 	c.NextIndex = 2
 	p := Compute(Input{Existing: s, New: []v1alpha1.Release{rel("e", 5)}}, c)
-	if len(p.Updates) != 1 || p.Updates[0].Name != "src-00001" || len(p.Creates) != 0 {
+	if len(p.Updates) != 1 || p.Updates[0].Name != firstSlice || len(p.Creates) != 0 {
 		t.Fatalf("plan %+v", p)
 	}
 	eq(t, tags(p.Updates[0]), "d", "e")
@@ -87,7 +90,7 @@ func TestSealExactlyFullLeavesNoOpen(t *testing.T) {
 		t.Fatal("sealed on fill")
 	}
 	p2 := Compute(Input{Existing: p.Final, New: []v1alpha1.Release{rel("c", 3)}}, Config{Source: "src", Namespace: "ns", MaxPerSlice: 2, Now: t0})
-	if len(p2.Creates) != 1 || len(p2.Updates) != 0 || p2.Creates[0].Name != "src-00001" {
+	if len(p2.Creates) != 1 || len(p2.Updates) != 0 || p2.Creates[0].Name != firstSlice {
 		t.Fatalf("plan %+v", p2)
 	}
 }
@@ -190,7 +193,7 @@ func TestRepairBeyondHardLimitIsRejectedNotGrown(t *testing.T) {
 	c := Config{Namespace: "ns", Source: "s", Now: t0, MaxPerSlice: 100, MaxBytes: 256 * 1024}
 	p := Compute(Input{New: news}, c)
 	before := EncodedSize(&p.Final[0])
-	var reps []v1alpha1.Release
+	reps := make([]v1alpha1.Release, 0, len(news))
 	for _, r := range news {
 		r2 := r
 		r2.MetadataUnresolved, r2.CreatedObserved = false, false
@@ -236,14 +239,14 @@ func TestRetention(t *testing.T) {
 	// minCount 3: delete slices 0 and 1 (7-2=5>=3, 5-2=3>=3), slice 2 would leave 1 < 3.
 	c.MinCount = 3
 	p := Compute(Input{Existing: s}, c)
-	eq(t, p.Deletes, "src-00000", "src-00001")
+	eq(t, p.Deletes, "src-00000", firstSlice)
 	if len(p.Final) != 2 {
 		t.Fatal("final")
 	}
 	// minCount 0: all sealed go, open stays.
 	c.MinCount = 0
 	p = Compute(Input{Existing: s}, c)
-	eq(t, p.Deletes, "src-00000", "src-00001", "src-00002")
+	eq(t, p.Deletes, "src-00000", firstSlice, "src-00002")
 	if len(p.Final) != 1 || p.Final[0].Sealed {
 		t.Fatal("open slice must survive")
 	}
@@ -273,11 +276,11 @@ func TestRetentionOldestByMinSequenceNotName(t *testing.T) {
 		fresh.Releases[i].Created = metav1.NewTime(c.Now)
 	}
 	// 00000 newest (fresh), 00001 middle, 00002 oldest, 00003 open with the highest sequences.
-	in := []v1alpha1.ReleaseSlice{fresh, mk("src-00001", true, 7, 8), mk("src-00002", true, 5, 6), mk("src-00003", false, 11)}
+	in := []v1alpha1.ReleaseSlice{fresh, mk(firstSlice, true, 7, 8), mk("src-00002", true, 5, 6), mk("src-00003", false, 11)}
 	p := Compute(Input{Existing: in}, c)
-	eq(t, p.Deletes, "src-00001", "src-00002") // by min sequence; 00000 is fresh and stops it
+	eq(t, p.Deletes, firstSlice, "src-00002") // by min sequence; 00000 is fresh and stops it
 	// an open slice holding the lowest sequences blocks retention (no holes)
-	in = []v1alpha1.ReleaseSlice{fresh, mk("src-00001", true, 7, 8), mk("src-00002", false, 1, 2)}
+	in = []v1alpha1.ReleaseSlice{fresh, mk(firstSlice, true, 7, 8), mk("src-00002", false, 1, 2)}
 	if p = Compute(Input{Existing: in}, c); len(p.Deletes) != 0 {
 		t.Fatalf("deleted %v", p.Deletes)
 	}
@@ -299,11 +302,11 @@ func TestDuplicateKeepsOlder(t *testing.T) {
 	c := cfg(5)
 	older := Compute(Input{New: []v1alpha1.Release{rel("a", 1), rel("b", 2)}}, c).Final[0]
 	newer := older.DeepCopy()
-	newer.Name = "src-00001"
+	newer.Name = firstSlice
 	newer.Releases = []v1alpha1.Release{rel("b", 2), rel("c", 3)}
 	c.NextIndex = 2
 	p := Compute(Input{Existing: []v1alpha1.ReleaseSlice{*newer, older}}, c)
-	if len(p.Updates) != 1 || p.Updates[0].Name != "src-00001" {
+	if len(p.Updates) != 1 || p.Updates[0].Name != firstSlice {
 		t.Fatalf("plan %+v", p)
 	}
 	eq(t, tags(p.Updates[0]), "c")
@@ -318,7 +321,7 @@ func TestNextIndexRaisedAboveExisting(t *testing.T) {
 	s := Compute(Input{New: []v1alpha1.Release{rel("a", 1)}}, c).Final // sealed 00000
 	c.NextIndex = 0                                                    // status lost
 	p := Compute(Input{Existing: s, New: []v1alpha1.Release{rel("b", 2)}}, c)
-	if p.Creates[0].Name != "src-00001" {
+	if p.Creates[0].Name != firstSlice {
 		t.Fatal(p.Creates[0].Name)
 	}
 }

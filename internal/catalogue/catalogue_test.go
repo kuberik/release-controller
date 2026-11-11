@@ -33,7 +33,7 @@ func newReg(n int) *reg {
 func tag(i int) string { return fmt.Sprintf("t%03d", i) }
 
 func (r *reg) refs() []source.Ref {
-	var out []source.Ref
+	out := make([]source.Ref, 0, len(r.created))
 	for t := range r.created {
 		out = append(out, source.Ref{Tag: t})
 	}
@@ -307,7 +307,7 @@ func TestSequencesStrictlyFollowPolicyAfterMixedSyncs(t *testing.T) {
 	}
 	cat := st.Catalogue
 	for i := 1; i < len(cat); i++ {
-		if !(cat[i-1].Tag < cat[i].Tag) || cat[i-1].Sequence >= cat[i].Sequence {
+		if cat[i-1].Tag >= cat[i].Tag || cat[i-1].Sequence >= cat[i].Sequence {
 			t.Fatalf("order broken at %s/%s seq %d/%d", cat[i-1].Tag, cat[i].Tag, cat[i-1].Sequence, cat[i].Sequence)
 		}
 	}

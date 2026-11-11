@@ -151,7 +151,7 @@ func start(t *testing.T, flux bool, budget int) *env {
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if resp.StatusCode/100 != 2 {
 			t.Fatalf("put %s:%s: %s", repo, tag, resp.Status)
 		}
@@ -175,7 +175,7 @@ func (e *env) slices(g Gomega, name string) []v1alpha1.ReleaseSlice {
 }
 
 func tags(s v1alpha1.ReleaseSlice) []string {
-	var out []string
+	out := make([]string, 0, len(s.Releases))
 	for _, r := range s.Releases {
 		out = append(out, r.Tag)
 	}
