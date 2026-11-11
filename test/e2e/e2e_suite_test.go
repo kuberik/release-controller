@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -56,9 +57,22 @@ func TestE2E(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
+	By("verifying the current kubectl context is the dedicated kind cluster")
+	kindCluster := os.Getenv("KIND_CLUSTER")
+	if kindCluster == "" {
+		kindCluster = "release-controller-test-e2e"
+	}
+	expectedContext := "kind-" + kindCluster
+	out, err := exec.Command("kubectl", "config", "current-context").Output()
+	currentContext := strings.TrimSpace(string(out))
+	// The suite installs and uninstalls CRDs in the current context, so never run elsewhere.
+	Expect(err).NotTo(HaveOccurred(), "Failed to read the current kubectl context")
+	Expect(currentContext).To(Equal(expectedContext),
+		"Refusing to run e2e tests: current kubectl context is %q, expected %q", currentContext, expectedContext)
+
 	By("building the manager(Operator) image")
 	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", projectImage))
-	_, err := utils.Run(cmd)
+	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the manager(Operator) image")
 
 	// TODO(user): If you want to change the e2e test vendor from Kind, ensure the image is
