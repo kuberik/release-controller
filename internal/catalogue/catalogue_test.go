@@ -395,3 +395,22 @@ func TestNegativeBudgetResolvesNothing(t *testing.T) {
 		t.Fatalf("a spent budget must resolve nothing: resolved %d admitted %d leftover %d", len(r.resolved), len(res.Admitted), res.Leftover)
 	}
 }
+
+// A registry whose tags were not created in tag order (a burst re-pushed out of
+// order) must still yield MinCount releases: the created rule filters
+// backports only once the catalogue already holds MinCount.
+func TestBackfillCreatedRuleNeverStarvesMinCount(t *testing.T) {
+	r := newReg(40)
+	// t030 was built first; everything below it was pushed afterwards.
+	for i := 1; i < 30; i++ {
+		r.created[tag(i)] = day0.Add(100*time.Hour + time.Duration(i)*time.Minute)
+	}
+	r.created[tag(30)] = day0.Add(50 * time.Hour)
+	for i := 31; i <= 40; i++ {
+		r.created[tag(i)] = day0.Add(200*time.Hour + time.Duration(i)*time.Minute)
+	}
+	res := Admit(State{}, r.refs(), r.cfg(day0.Add(90*24*time.Hour), 7, 20, 100))
+	if len(res.Admitted) != 20 || !res.BackfillComplete {
+		t.Fatalf("admitted %d (want the MinCount floor of 20), complete %v", len(res.Admitted), res.BackfillComplete)
+	}
+}
