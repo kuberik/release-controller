@@ -46,7 +46,24 @@ linters:
       # every other function. Remove an entry once its function is split up.
       - linters:
           - gocyclo
-        text: "of func `(check|Admit|\\(\\*ReleaseSourceReconciler\\)\\.Reconcile|Compute|parseManifest)` is high"
+        path: hack/parity/main.go
+        text: "of func `check` is high"
+      - linters:
+          - gocyclo
+        path: internal/catalogue/catalogue.go
+        text: "of func `Admit` is high"
+      - linters:
+          - gocyclo
+        path: internal/controller/releasesource_controller.go
+        text: "of func `\\(\\*ReleaseSourceReconciler\\)\\.Reconcile` is high"
+      - linters:
+          - gocyclo
+        path: internal/slicer/slicer.go
+        text: "of func `Compute` is high"
+      - linters:
+          - gocyclo
+        path: internal/source/oci/manifest.go
+        text: "of func `parseManifest` is high"
     paths:
       - third_party$
       - builtin$
