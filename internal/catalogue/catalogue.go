@@ -13,7 +13,8 @@
 //     first, while the catalogue does not yet reach back to the retention
 //     window (or is empty). A tag is admitted iff its created time is not later
 //     than that of every admitted tag above it ("it was the newest when it was
-//     pushed"); a backport or a retag fails this and is excluded,
+//     pushed"); a backport or a retag fails this and is excluded once the
+//     catalogue holds MinCount (below that, the floor wins),
 //     deterministically from registry state. Admitted tags are numbered
 //     min-1, min-2, ... The walk stops when at least MinCount releases are
 //     admitted and the last one is older than the retention cutoff, or when
@@ -340,8 +341,11 @@ func Admit(st State, refs []source.Ref, cfg Config) Result {
 		}
 		res.WalkPos = ref.Tag
 		real := hasCreated(rel)
-		if real && runMin != nil && sec(rel.Created.Time).After(*runMin) {
-			continue // created later than a tag above it: a backport or retag
+		// A tag created later than a tag above it is a backport or retag, but
+		// only once the catalogue holds MinCount: the floor wins, or a registry
+		// whose tags were pushed out of order would starve the retention minimum.
+		if real && runMin != nil && count >= cfg.MinCount && sec(rel.Created.Time).After(*runMin) {
+			continue
 		}
 		rel.Sequence = nextLow
 		nextLow--
@@ -349,7 +353,9 @@ func Admit(st State, refs []source.Ref, cfg Config) Result {
 		count++
 		if real {
 			c := sec(rel.Created.Time)
-			runMin = &c
+			if runMin == nil || c.Before(*runMin) {
+				runMin = &c
+			}
 			if pastWindow(&c) {
 				break
 			}
