@@ -154,7 +154,7 @@ func (r *ReleaseSourceReconciler) forgetMem(uid types.UID) {
 
 // failed registers a failed resolve of tag and returns when to retry:
 // exponential from 10 s, capped at 1 h.
-func (m *sourceMem) failed(tag string, now time.Time) time.Time {
+func (m *sourceMem) failed(tag string, now time.Time) {
 	e := m.backoff[tag]
 	e.attempts++
 	d := backoffInitial << (e.attempts - 1)
@@ -163,7 +163,6 @@ func (m *sourceMem) failed(tag string, now time.Time) time.Time {
 	}
 	e.next = now.Add(d)
 	m.backoff[tag] = e
-	return e.next
 }
 
 func (m *sourceMem) held(tag string, now time.Time) bool {
@@ -247,7 +246,7 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if factory == nil {
 		var ferr error
 		if factory, ferr = source.Lookup("oci"); ferr != nil {
-			return r.fail(ctx, &rs, st, now, interval, kuberikcomv1alpha1.ReadyCondition, "ConfigInvalid", ferr.Error())
+			return r.fail(ctx, &rs, st, interval, kuberikcomv1alpha1.ReadyCondition, "ConfigInvalid", ferr.Error())
 		}
 	}
 	var reader client.Reader = r.Client
@@ -257,7 +256,7 @@ func (r *ReleaseSourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	src, err := factory(ctx, reader, &rs)
 	if err != nil {
 		r.event(&rs, "Warning", "ConfigInvalid", err.Error())
-		return r.fail(ctx, &rs, st, now, interval, kuberikcomv1alpha1.ReadyCondition, "ConfigInvalid", err.Error())
+		return r.fail(ctx, &rs, st, interval, kuberikcomv1alpha1.ReadyCondition, "ConfigInvalid", err.Error())
 	}
 
 	// Identity change: the catalogue belongs to a different source. Validate
@@ -684,7 +683,7 @@ func (r *ReleaseSourceReconciler) finish(ctx context.Context, rs *kuberikcomv1al
 }
 
 // fail records bad config: Ready=False, no slice writes.
-func (r *ReleaseSourceReconciler) fail(ctx context.Context, rs *kuberikcomv1alpha1.ReleaseSource, st *kuberikcomv1alpha1.ReleaseSourceStatus, now time.Time, interval time.Duration, _ string, reason, msg string) (ctrl.Result, error) {
+func (r *ReleaseSourceReconciler) fail(ctx context.Context, rs *kuberikcomv1alpha1.ReleaseSource, st *kuberikcomv1alpha1.ReleaseSourceStatus, interval time.Duration, _ string, reason, msg string) (ctrl.Result, error) {
 	r.setReady(st, rs.Generation, false, reason, msg)
 	return r.finish(ctx, rs, st, interval, 0)
 }
@@ -709,7 +708,7 @@ func (r *ReleaseSourceReconciler) unreachable(ctx context.Context, rs *kuberikco
 // creates and updates must not trigger a registry listing.
 func (r *ReleaseSourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Recorder == nil {
-		r.Recorder = mgr.GetEventRecorderFor("release-controller")
+		r.Recorder = mgr.GetEventRecorderFor("release-controller") //nolint:staticcheck // SA1019: Recorder is a record.EventRecorder; moving to the events.k8s.io API also changes the RBAC the chart grants
 	}
 	deleteOnly := predicate.Funcs{
 		CreateFunc:  func(event.CreateEvent) bool { return false },
