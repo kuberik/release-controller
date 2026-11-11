@@ -76,7 +76,7 @@ func New(cfg Config) (*Source, error) {
 	if err != nil {
 		return nil, err
 	}
-	var exc []*regexp.Regexp
+	exc := make([]*regexp.Regexp, 0, len(cfg.Exclude))
 	for _, e := range cfg.Exclude {
 		re, err := regexp.Compile(e)
 		if err != nil {

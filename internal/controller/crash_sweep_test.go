@@ -452,7 +452,7 @@ var _ = Describe("crash sweep, backfill stubs, sequence collision", func() {
 		}
 		_, _ = fmt.Printf("QA4 WEDGE errs=%d/5 count=%d (want 15) conds=%v events=%v\n", errs, len(m), conds, evs)
 		Expect(errs).To(Equal(0))
-		Expect(len(m)).To(Equal(12), "no writes while the collision stands")
+		Expect(m).To(HaveLen(12), "no writes while the collision stands")
 		ready := meta.FindStatusCondition(rs.Status.Conditions, kuberikcomv1alpha1.ReadyCondition)
 		Expect(ready).NotTo(BeNil())
 		Expect(ready.Status).To(Equal(metav1.ConditionFalse))

@@ -36,6 +36,17 @@ linters:
           - dupl
           - lll
         path: internal/*
+      # hack/parity is a developer-run diagnostic that compares the catalogue
+      # against a live cluster; its report lines are long format strings.
+      - linters:
+          - lll
+        path: hack/parity/
+      # Known-large functions. Splitting them is a behavioural refactor that
+      # deserves its own change; the threshold stays at the default 30 for
+      # every other function. Remove an entry once its function is split up.
+      - linters:
+          - gocyclo
+        text: "of func `(check|Admit|\\(\\*ReleaseSourceReconciler\\)\\.Reconcile|Compute|parseManifest)` is high"
     paths:
       - third_party$
       - builtin$

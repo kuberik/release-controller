@@ -87,7 +87,7 @@ var _ = Describe("rebuild then one failed status write", func() {
 		got := &kuberikcomv1alpha1.ReleaseSource{}
 		Expect(k8sClient.Get(ctx, key, got)).To(Succeed())
 		_, _ = fmt.Printf("QA5 %s after 15 syncs: count=%d/40 backfillComplete=%v\n", label, len(slicer.Merge(l.Items)), got.Status.BackfillComplete)
-		Expect(len(slicer.Merge(l.Items))).To(Equal(40), label)
+		Expect(slicer.Merge(l.Items)).To(HaveLen(40), label)
 		Expect(got.Status.BackfillComplete).To(BeTrue(), label)
 	}
 	It("identity change (spec image edit)", func() {

@@ -269,7 +269,7 @@ func Compute(in Input, cfg Config) Plan {
 	}
 
 	// Append in admission order: the open slice first, then new slices.
-	var fresh []v1alpha1.Release
+	fresh := make([]v1alpha1.Release, 0, len(in.New))
 	seenNew := map[string]struct{}{}
 	for _, r := range in.New {
 		if _, ok := owner[r.Tag]; ok {

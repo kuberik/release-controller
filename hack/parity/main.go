@@ -40,6 +40,13 @@ import (
 	"github.com/kuberik/release-controller/internal/source/oci"
 )
 
+// Verdicts check reports for one ReleaseSource.
+const (
+	verdictPass = "PASS"
+	verdictWarn = "WARN"
+	verdictFail = "FAIL"
+)
+
 type todayRelease struct {
 	Tag                string            `json:"tag"`
 	Digest             *string           `json:"digest"`
@@ -196,10 +203,10 @@ func run(b *baseline, now time.Time) int {
 			continue
 		}
 		c := cats[catKey(r)]
-		switch check(id, r, c, b, now) {
-		case "PASS":
+		switch check(id, r, c, b) {
+		case verdictPass:
 			pass++
-		case "WARN":
+		case verdictWarn:
 			warn++
 		default:
 			fail++
@@ -357,7 +364,7 @@ func build(b *baseline, r *rollout, now time.Time, c *built) {
 // recorded it (registry created is later than the recorded one). Today's list
 // never refreshes a resolved entry, so it is stale by construction.
 func retagged(t todayRelease, got source.Release) bool {
-	return t.Created != nil && !got.CreatedObserved && got.Created.Time.After(*t.Created)
+	return t.Created != nil && !got.CreatedObserved && got.Created.After(*t.Created)
 }
 
 func str(p *string) string {
@@ -367,11 +374,11 @@ func str(p *string) string {
 	return *p
 }
 
-func check(id string, r *rollout, c *built, b *baseline, now time.Time) string {
+func check(id string, r *rollout, c *built, b *baseline) string {
 	days, minCount := retentionOf(r)
 	if c.err != nil {
 		fmt.Printf("FAIL %s: cannot build catalogue: %v\n", id, c.err)
-		return "FAIL"
+		return verdictFail
 	}
 	cat := c.final
 	pos := map[string]int{}
@@ -384,7 +391,8 @@ func check(id string, r *rollout, c *built, b *baseline, now time.Time) string {
 	}
 	stub := func(tag string) source.Release { return source.Release{Tag: tag} }
 
-	var problems, accepted, warns []string
+	var problems, warns []string
+	accepted := make([]string, 0, len(r.Status.Available))
 	today := map[string]todayRelease{}
 	var minC, maxC *time.Time
 	lastPos := -1
@@ -414,7 +422,7 @@ func check(id string, r *rollout, c *built, b *baseline, now time.Time) string {
 		}
 		newer := 0
 		for _, cr := range cat {
-			if dc != nil && !cr.CreatedObserved && cr.Created.Time.After(*dc) {
+			if dc != nil && !cr.CreatedObserved && cr.Created.After(*dc) {
 				newer++
 			}
 		}
@@ -493,7 +501,7 @@ func check(id string, r *rollout, c *built, b *baseline, now time.Time) string {
 			why = "pushed-after-baseline"
 		case !a.CreatedObserved && minC != nil && a.Created.Time.Before(*minC):
 			why = "predates-first-observed"
-		case !a.CreatedObserved && minC != nil && maxC != nil && !a.Created.Time.Before(*minC) && !a.Created.Time.After(*maxC):
+		case !a.CreatedObserved && minC != nil && maxC != nil && !a.Created.Time.Before(*minC) && !a.Created.After(*maxC):
 			why = "pushed-between-scans"
 		case a.CreatedObserved:
 			why = "other: no created annotation (created=firstSeen)"
@@ -507,19 +515,19 @@ func check(id string, r *rollout, c *built, b *baseline, now time.Time) string {
 		accepted = append(accepted, fmt.Sprintf("%s: MetadataRejected (%s)", tag, why))
 	}
 
-	verdict := "PASS"
+	verdict := verdictPass
 	if len(warns) > 0 {
-		verdict = "WARN"
+		verdict = verdictWarn
 	}
 	if len(problems) > 0 {
-		verdict = "FAIL"
+		verdict = verdictFail
 	}
-	var rs []string
 	keys := make([]string, 0, len(reasons))
 	for k := range reasons {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
+	rs := make([]string, 0, len(keys))
 	for _, k := range keys {
 		rs = append(rs, fmt.Sprintf("%s=%d", k, len(reasons[k])))
 	}

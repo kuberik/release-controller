@@ -66,7 +66,7 @@ func newFake() *fakeSource {
 
 func fakeTag(i int) string {
 	h := fnv.New64a()
-	fmt.Fprint(h, i)
+	_, _ = fmt.Fprint(h, i)
 	return fmt.Sprintf("main-%010d-%040x", i, h.Sum64())
 }
 
@@ -92,7 +92,7 @@ func (f *fakeSource) Discover(_ context.Context, _ string) (source.DiscoverResul
 	if f.err != nil {
 		return source.DiscoverResult{}, f.err
 	}
-	var refs []source.Ref
+	refs := make([]source.Ref, 0, len(f.tags))
 	for _, t := range f.tags {
 		refs = append(refs, source.Ref{Tag: t})
 	}
@@ -107,7 +107,7 @@ func (f *fakeSource) Resolve(_ context.Context, ref source.Ref) (source.Release,
 		return source.Release{Tag: ref.Tag, MetadataUnresolved: true}, nil
 	}
 	h := fnv.New64a()
-	fmt.Fprint(h, ref.Tag)
+	_, _ = fmt.Fprint(h, ref.Tag)
 	sum := h.Sum64()
 	r := source.Release{
 		Tag:      ref.Tag,

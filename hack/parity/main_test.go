@@ -1,9 +1,10 @@
 package main
 
 import (
-	imagev1 "github.com/fluxcd/image-reflector-controller/api/v1"
 	"testing"
 	"time"
+
+	imagev1 "github.com/fluxcd/image-reflector-controller/api/v1"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -48,17 +49,17 @@ func TestDeployedRetaggedTagIsJudgedByTheFallbackRule(t *testing.T) {
 
 	// no candidate created after the deployed entry: FAIL, even though retagged
 	r, c := mk(source.Release{Tag: "b", Created: metav1.NewTime(then.Add(-time.Hour))})
-	if got := check("ns/r", r, c, b, now); got != "FAIL" {
+	if got := check("ns/r", r, c, b); got != verdictFail {
 		t.Fatalf("no fallback candidates: got %s, want FAIL", got)
 	}
 	// the only newer release has created=firstSeen: not a candidate
 	r, c = mk(source.Release{Tag: "b", Created: metav1.NewTime(now), CreatedObserved: true})
-	if got := check("ns/r", r, c, b, now); got != "FAIL" {
+	if got := check("ns/r", r, c, b); got != verdictFail {
 		t.Fatalf("observed-only candidate: got %s, want FAIL", got)
 	}
 	// a real newer release: WARN
 	r, c = mk(source.Release{Tag: "b", Created: metav1.NewTime(now)})
-	if got := check("ns/r", r, c, b, now); got != "WARN" {
+	if got := check("ns/r", r, c, b); got != verdictWarn {
 		t.Fatalf("real candidate: got %s, want WARN", got)
 	}
 }
