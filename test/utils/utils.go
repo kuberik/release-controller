@@ -224,3 +224,14 @@ func UncommentCode(filename, target, prefix string) error {
 
 	return nil
 }
+
+// CheckKubeContext returns an error unless currentContext is the context kind creates for
+// kindCluster ("kind-<name>"). The e2e suite installs and removes cluster-wide resources, so it
+// must only ever run against its own throwaway kind cluster.
+func CheckKubeContext(currentContext, kindCluster string) error {
+	expected := "kind-" + kindCluster
+	if currentContext != expected {
+		return fmt.Errorf("current kubectl context is %q, expected %q", currentContext, expected)
+	}
+	return nil
+}
