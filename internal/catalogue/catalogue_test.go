@@ -414,3 +414,24 @@ func TestBackfillCreatedRuleNeverStarvesMinCount(t *testing.T) {
 		t.Fatalf("admitted %d (want the MinCount floor of 20), complete %v", len(res.Admitted), res.BackfillComplete)
 	}
 }
+
+// Once MinCount is met the walk keeps going while releases are still inside the
+// retention window, and stops only at the first one older than the cutoff.
+func TestBackfillWalksPastMinCountWhileInsideWindow(t *testing.T) {
+	r := newReg(30)
+	// t029 was pushed after t030: it still counts toward the MinCount floor.
+	r.created[tag(29)] = day0.Add(30*24*time.Hour + 12*time.Hour)
+	now := day0.Add(30 * 24 * time.Hour) // cutoff = day 23, so t022 is the first past the window
+	res := Admit(State{}, r.refs(), r.cfg(now, 7, 3, 100))
+	if !res.BackfillComplete {
+		t.Fatal("expected complete")
+	}
+	got := make([]string, 0, len(res.Admitted))
+	for _, a := range res.Admitted {
+		got = append(got, a.Tag)
+	}
+	want := []string{"t030", "t029", "t028", "t027", "t026", "t025", "t024", "t023", "t022"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("admitted %v, want %v (all releases inside the window, past MinCount 3)", got, want)
+	}
+}
