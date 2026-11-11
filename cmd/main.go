@@ -180,7 +180,8 @@ func main() {
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "release-controller.kuberik.com", // was 8108ddc4.kuberik.com, rollout-controller's lease: the two never ran together
+		// Own lease: rollout-controller holds 8108ddc4.kuberik.com in the same namespace.
+		LeaderElectionID: "release-controller.kuberik.com",
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
