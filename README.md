@@ -128,3 +128,7 @@ is idempotent.
 ## Development
 
 `command make test` (envtest), `command make manifests generate`, `command make build`.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).
