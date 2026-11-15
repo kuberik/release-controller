@@ -117,8 +117,8 @@ Equivalent by hand:
 
 ```sh
 bin/kustomize build config/dev \
-  | KIND_CLUSTER_NAME=rollout-dev KO_DOCKER_REPO=kind.local ko resolve -f - >| ../.work/release-controller/resolved-rollout-dev.yaml
-kubectl --context kind-rollout-dev apply -f ../.work/release-controller/resolved-rollout-dev.yaml
+  | KIND_CLUSTER_NAME=rollout-dev KO_DOCKER_REPO=kind.local ko resolve -f - \
+  | kubectl --context kind-rollout-dev apply -f -
 ```
 
 `config/dev` deploys into the existing `kuberik-system` namespace (the Namespace object

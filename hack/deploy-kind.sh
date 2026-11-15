@@ -20,7 +20,7 @@ done
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 KUSTOMIZE=${KUSTOMIZE:-$ROOT/bin/kustomize}
-OUT=${OUT_DIR:-$ROOT/../.work/release-controller}
+OUT=${OUT_DIR:-$ROOT/bin/dev}
 mkdir -p "$OUT"
 RESOLVED=$OUT/resolved-$CLUSTER.yaml
 
