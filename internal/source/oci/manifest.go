@@ -13,6 +13,11 @@ import (
 // requirement. Same value as rollout-controller's api RequiresAnnotationPrefix.
 const RequiresAnnotationPrefix = "com.kuberik.rollout.requires."
 
+// RollbackBarrierAnnotation marks a release as a rollback barrier. It is copied
+// verbatim into Release.Metadata under the same key; rollout-controller treats
+// the value "true" as a barrier.
+const RollbackBarrierAnnotation = "com.kuberik.rollout.rollback-barrier"
+
 // Bounds on the requires annotations one image may declare. They match the
 // MaxProperties / CEL markers on Release.Requires, so a hostile or broken image
 // cannot produce a slice the API server would reject. Exceeding any of them is
@@ -49,6 +54,8 @@ type metadata struct {
 	Description  *string
 	Created      *metav1.Time
 	Requires     map[string]string
+	// RollbackBarrier is the rollback-barrier annotation value, nil when absent or empty.
+	RollbackBarrier *string
 }
 
 type boundsError struct{ msg string }
@@ -74,6 +81,7 @@ func parseManifest(manifest []byte, imageRef string) (metadata, error) {
 	var versionStr, revisionStr, artifactTypeStr, sourceStr, titleStr, descriptionStr *string
 	var createdTime *metav1.Time
 	var requires map[string]string
+	var barrierStr *string
 
 	// Artifact type preference: artifactType, config.mediaType, manifest.mediaType.
 	if manifestData.ArtifactType != "" {
@@ -140,6 +148,15 @@ func parseManifest(manifest []byte, imageRef string) (metadata, error) {
 				descriptionStr = &d
 			}
 		}
+		if barrierStr == nil {
+			if b, ok := annotations[RollbackBarrierAnnotation]; ok && b != "" {
+				if len(b) > maxRequiresValueLength {
+					return metadata{}, &boundsError{fmt.Sprintf(
+						"rollback-barrier annotation on %s exceeds the size limit (%d bytes)", imageRef, maxRequiresValueLength)}
+				}
+				barrierStr = &b
+			}
+		}
 		if createdTime == nil {
 			if c, ok := annotations["org.opencontainers.image.created"]; ok && c != "" {
 				if parsed, err := time.Parse(time.RFC3339, c); err == nil {
@@ -150,13 +167,14 @@ func parseManifest(manifest []byte, imageRef string) (metadata, error) {
 	}
 
 	return metadata{
-		Version:      versionStr,
-		Revision:     revisionStr,
-		ArtifactType: artifactTypeStr,
-		Source:       sourceStr,
-		Title:        titleStr,
-		Description:  descriptionStr,
-		Created:      createdTime,
-		Requires:     requires,
+		Version:         versionStr,
+		Revision:        revisionStr,
+		ArtifactType:    artifactTypeStr,
+		Source:          sourceStr,
+		Title:           titleStr,
+		Description:     descriptionStr,
+		Created:         createdTime,
+		Requires:        requires,
+		RollbackBarrier: barrierStr,
 	}, nil
 }
