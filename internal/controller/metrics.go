@@ -9,6 +9,16 @@ import (
 	kuberikcomv1alpha1 "github.com/kuberik/release-controller/api/v1alpha1"
 )
 
+// Metric labels. Per-source series carry all three.
+const (
+	labelKind      = "kind"
+	labelNamespace = "namespace"
+	labelName      = "name"
+)
+
+// sourceLabels identify a ReleaseSource's series.
+var sourceLabels = []string{labelKind, labelNamespace, labelName}
+
 // Metrics (design §4). Per-source series are labelled kind/namespace/name and
 // removed when the ReleaseSource is gone.
 var (
@@ -16,19 +26,19 @@ var (
 		Name:    "release_controller_sync_duration_seconds",
 		Help:    "Duration of one ReleaseSource sync.",
 		Buckets: prometheus.ExponentialBuckets(0.01, 2.5, 10),
-	}, []string{"kind"})
+	}, []string{labelKind})
 	releasesGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "release_controller_releases",
 		Help: "Releases in the catalogue of a source.",
-	}, []string{"kind", "namespace", "name"})
+	}, sourceLabels)
 	slicesGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "release_controller_slices",
 		Help: "ReleaseSlices of a source.",
-	}, []string{"kind", "namespace", "name"})
+	}, sourceLabels)
 	resolveErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "release_controller_resolve_errors_total",
 		Help: "Tags whose metadata could not be resolved or was rejected.",
-	}, []string{"kind", "namespace", "name"})
+	}, sourceLabels)
 )
 
 func init() {
@@ -47,7 +57,7 @@ func observeSync(rs *kuberikcomv1alpha1.ReleaseSource, start time.Time) {
 }
 
 func forgetMetrics(ns, name string) {
-	releasesGauge.DeletePartialMatch(map[string]string{"namespace": ns, "name": name})
-	slicesGauge.DeletePartialMatch(map[string]string{"namespace": ns, "name": name})
-	resolveErrors.DeletePartialMatch(map[string]string{"namespace": ns, "name": name})
+	releasesGauge.DeletePartialMatch(map[string]string{labelNamespace: ns, labelName: name})
+	slicesGauge.DeletePartialMatch(map[string]string{labelNamespace: ns, labelName: name})
+	resolveErrors.DeletePartialMatch(map[string]string{labelNamespace: ns, labelName: name})
 }

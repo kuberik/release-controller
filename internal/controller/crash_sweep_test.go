@@ -440,7 +440,7 @@ var _ = Describe("crash sweep, backfill stubs, sequence collision", func() {
 		errs := settle(5)
 		rs := &kuberikcomv1alpha1.ReleaseSource{}
 		Expect(k8sClient.Get(ctx, key(), rs)).To(Succeed())
-		var conds []string
+		conds := make([]string, 0, len(rs.Status.Conditions))
 		for _, c := range rs.Status.Conditions {
 			conds = append(conds, fmt.Sprintf("%s=%s/%s", c.Type, c.Status, c.Reason))
 		}

@@ -116,5 +116,5 @@ type ReleaseSliceList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&ReleaseSlice{}, &ReleaseSliceList{})
+	register(&ReleaseSlice{}, &ReleaseSliceList{})
 }

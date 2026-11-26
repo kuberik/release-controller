@@ -244,5 +244,5 @@ type ReleaseSourceList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&ReleaseSource{}, &ReleaseSourceList{})
+	register(&ReleaseSource{}, &ReleaseSourceList{})
 }
