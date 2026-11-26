@@ -118,7 +118,10 @@ func start(t *testing.T, flux bool, budget int) *env {
 	t.Cleanup(func() {
 		cancel()
 		select {
-		case <-done:
+		case err := <-done:
+			if err != nil {
+				t.Logf("manager stopped: %v", err)
+			}
 		case <-time.After(20 * time.Second):
 		}
 	})
