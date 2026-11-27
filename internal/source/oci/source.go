@@ -193,6 +193,9 @@ func (s *Source) Resolve(ctx context.Context, ref source.Ref) (source.Release, e
 	rel.Version = md.Version
 	rel.Revision = md.Revision
 	rel.Requires = md.Requires
+	if md.RollbackBarrier != nil {
+		rel.Metadata = map[string]string{RollbackBarrierAnnotation: *md.RollbackBarrier}
+	}
 	// Bounds of the ReleaseSlice CRD: an over-long field would fail the whole
 	// slice write, so treat it as a violation like requires (fail closed).
 	var violations []string

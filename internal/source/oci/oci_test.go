@@ -280,6 +280,24 @@ func TestResolveAnnotationPrecedence(t *testing.T) {
 	}
 }
 
+func TestResolveRollbackBarrier(t *testing.T) {
+	r := newReg(t, nil)
+	k := RollbackBarrierAnnotation
+	r.put("mfst", mtManifest, image(map[string]string{k: "true"}, map[string]string{k: "false"}, nil))
+	r.put("cfg", mtManifest, image(nil, map[string]string{k: "true"}, nil))
+	r.put("none", mtManifest, image(map[string]string{"other": "x"}, map[string]string{k: ""}, nil))
+	s := newSrc(t, r, nil, nil)
+	if rel := resolve(t, s, "mfst"); rel.Metadata[k] != "true" || len(rel.Metadata) != 1 {
+		t.Fatalf("manifest annotation wins: %v", rel.Metadata)
+	}
+	if rel := resolve(t, s, "cfg"); rel.Metadata[k] != "true" {
+		t.Fatalf("config annotation is the fallback: %v", rel.Metadata)
+	}
+	if rel := resolve(t, s, "none"); rel.Metadata != nil {
+		t.Fatalf("no barrier, no metadata: %v", rel.Metadata)
+	}
+}
+
 func TestResolveRequires(t *testing.T) {
 	r := newReg(t, nil)
 	p := RequiresAnnotationPrefix
